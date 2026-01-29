@@ -1,17 +1,19 @@
 /**
  * HTTP Server for Context Protocol Integration
- * Provides SSE and HTTP Streaming transports for MCP
+ * Provides SSE and HTTP Streaming transports for MCP with security middleware
  */
 
 import express, { Request, Response } from 'express';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createContextMiddleware } from '@ctxprotocol/sdk';
 import { config, mcpMetadata, validateConfig, logConfigSummary } from './config.js';
 import { registerTools } from './tools/registry.js';
 import { initializeRedis, shutdownRedis } from './cache/index.js';
 
 /**
  * HTTP-based MCP Server for Context Protocol
+ * Implements Data Broker Standard with output schemas
  */
 export class HttpMcpServer {
   private app: express.Application;
@@ -64,7 +66,7 @@ export class HttpMcpServer {
    * Setup routes for Context Protocol
    */
   private setupRoutes(): void {
-    // Health check endpoint
+    // Health check endpoint - No auth required
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
         status: 'healthy',
@@ -87,12 +89,14 @@ export class HttpMcpServer {
           mcp: '/mcp',
         },
         documentation: 'https://github.com/your-repo/trading-intelligence-mcp',
+        dataBokerStandard: true, // Indicates output schemas are defined
+        securityEnabled: true, // Context Protocol JWT authentication
       });
     });
 
-    // SSE endpoint for Context Protocol
-    this.app.get('/sse', async (req: Request, res: Response) => {
-      console.log('📡 New SSE connection from Context Protocol');
+    // SSE endpoint for Context Protocol - With authentication
+    this.app.get('/sse', createContextMiddleware(), async (req: Request, res: Response) => {
+      console.log('📡 New authenticated SSE connection from Context Protocol');
 
       try {
         // Create SSE transport
@@ -114,16 +118,16 @@ export class HttpMcpServer {
       }
     });
 
-    // Message endpoint for SSE transport
-    this.app.post('/messages', express.text({ type: '*/*' }), async (_req: Request, res: Response) => {
-      console.log('📨 Received message via SSE transport');
+    // Message endpoint for SSE transport - With authentication
+    this.app.post('/messages', createContextMiddleware(), express.text({ type: '*/*' }), async (_req: Request, res: Response) => {
+      console.log('📨 Received authenticated message via SSE transport');
       // The SSE transport handles this internally
       res.sendStatus(202);
     });
 
-    // HTTP Streaming endpoint for Context Protocol
-    this.app.post('/mcp', async (req: Request, res: Response) => {
-      console.log('📡 MCP HTTP Streaming request');
+    // HTTP Streaming endpoint for Context Protocol - With authentication
+    this.app.post('/mcp', createContextMiddleware(), async (req: Request, res: Response) => {
+      console.log('📡 MCP HTTP Streaming request (authenticated)');
 
       try {
         // For HTTP streaming, we'll handle requests directly
@@ -185,10 +189,10 @@ export class HttpMcpServer {
         console.warn('⚠️  Redis initialization failed, caching will be disabled:', (error as Error).message);
       }
 
-      // Register all MCP tools
-      console.log('🔧 Registering MCP tools...');
+      // Register all MCP tools with output schemas
+      console.log('🔧 Registering MCP tools with Data Broker Standard...');
       await registerTools(this.mcpServer);
-      console.log('✅ All tools registered successfully');
+      console.log('✅ All tools registered with output schemas');
       console.log('');
 
     } catch (error) {
@@ -207,11 +211,13 @@ export class HttpMcpServer {
       this.server = this.app.listen(this.port, () => {
         console.log('🚀 HTTP MCP Server is running');
         console.log(`📡 Listening on port ${this.port}`);
+        console.log('🔒 Context Protocol JWT authentication enabled');
+        console.log('📊 Data Broker Standard compliant (output schemas defined)');
         console.log('');
         console.log('📊 Available Endpoints:');
         console.log(`   Health: http://localhost:${this.port}/health`);
-        console.log(`   SSE:    http://localhost:${this.port}/sse`);
-        console.log(`   MCP:    http://localhost:${this.port}/mcp`);
+        console.log(`   SSE:    http://localhost:${this.port}/sse (authenticated)`);
+        console.log(`   MCP:    http://localhost:${this.port}/mcp (authenticated)`);
         console.log('');
         console.log('✨ Ready for Context Protocol requests');
         resolve();
