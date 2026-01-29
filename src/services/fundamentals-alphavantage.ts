@@ -1,0 +1,864 @@
+/**
+ * Alpha Vantage Fundamentals Service
+ * 
+ * Replacement for Finnhub fundamentals service using Alpha Vantage API.
+ * Implements smart rate limiting and daily quota management for free tier (25 requests/day).
+ * 
+ * Features:
+ * - Company overview with description
+ * - Quarterly earnings data
+ * - Financial statements (income, balance sheet, cash flow)
+ * - Multi-layer rate limit strategy
+ * - Graceful degradation when limits reached
+ */
+
+import { APIError } from '../types.js';
+import { apiConfig } from '../config.js';
+import { getCacheService } from '../cache/index.js';
+
+
+
+/**
+ * Type definitions matching Finnhub interface
+ */
+export interface CompanyOverview {
+    symbol: string;
+    name: string;
+    description: string;
+    sector: string;
+    industry: string;
+    marketCap: number;
+    peRatio?: number;
+    eps?: number;
+    dividendYield?: number;
+    week52High?: number;
+    week52Low?: number;
+    averageVolume?: number;
+    beta?: number;
+    exchange: string;
+    currency: string;
+    country: string;
+    ipo?: string;
+    weburl?: string;
+    logo?: string;
+    phone?: string;
+    timestamp: Date;
+}
+
+export interface ExtendedEarningsData {
+    symbol: string;
+    quarter: string;
+    year: number;
+    reportDate: Date;
+    epsEstimate?: number;
+    epsActual?: number;
+    revenueEstimate?: number;
+    revenueActual?: number;
+    surprise?: number;
+    surprisePercent?: number;
+    period: string;
+}
+
+export interface FinancialStatement {
+    symbol: string;
+    fiscalYear: number;
+    fiscalQuarter?: number;
+    period: string;
+    reportDate: Date;
+
+    // Balance Sheet
+    totalAssets?: number;
+    totalLiabilities?: number;
+    totalEquity?: number;
+    totalDebt?: number;
+    currentAssets?: number;
+    currentLiabilities?: number;
+    cash?: number;
+
+    // Income Statement
+    revenue?: number;
+    costOfRevenue?: number;
+    grossProfit?: number;
+    operatingIncome?: number;
+    netIncome?: number;
+    ebitda?: number;
+
+    // Cash Flow
+    operatingCashFlow?: number;
+    investingCashFlow?: number;
+    financingCashFlow?: number;
+    freeCashFlow?: number;
+
+    // Margins
+    grossMargin?: number;
+    operatingMargin?: number;
+    netMargin?: number;
+
+    timestamp: Date;
+}
+
+/**
+ * Alpha Vantage API response types
+ */
+interface AlphaVantageOverview {
+    Symbol: string;
+    Name: string;
+    Description: string;
+    Exchange: string;
+    Currency: string;
+    Country: string;
+    Sector: string;
+    Industry: string;
+    MarketCapitalization: string;
+    PERatio: string;
+    EPS: string;
+    DividendYield: string;
+    '52WeekHigh': string;
+    '52WeekLow': string;
+    Beta: string;
+    Address?: string;
+    OfficialSite?: string;
+}
+
+interface AlphaVantageEarningsResponse {
+    symbol: string;
+    quarterlyEarnings: Array<{
+        fiscalDateEnding: string;
+        reportedDate: string;
+        reportedEPS: string;
+        estimatedEPS: string;
+        surprise: string;
+        surprisePercentage: string;
+    }>;
+}
+
+interface AlphaVantageIncomeStatement {
+    symbol: string;
+    annualReports?: Array<{
+        fiscalDateEnding: string;
+        totalRevenue: string;
+        costOfRevenue: string;
+        grossProfit: string;
+        operatingIncome: string;
+        netIncome: string;
+        ebitda: string;
+    }>;
+    quarterlyReports?: Array<{
+        fiscalDateEnding: string;
+        totalRevenue: string;
+        costOfRevenue: string;
+        grossProfit: string;
+        operatingIncome: string;
+        netIncome: string;
+        ebitda: string;
+    }>;
+}
+
+interface AlphaVantageBalanceSheet {
+    symbol: string;
+    annualReports?: Array<{
+        fiscalDateEnding: string;
+        totalAssets: string;
+        totalLiabilities: string;
+        totalShareholderEquity: string;
+        totalCurrentAssets: string;
+        totalCurrentLiabilities: string;
+        cashAndCashEquivalentsAtCarryingValue: string;
+        longTermDebt: string;
+    }>;
+    quarterlyReports?: Array<{
+        fiscalDateEnding: string;
+        totalAssets: string;
+        totalLiabilities: string;
+        totalShareholderEquity: string;
+        totalCurrentAssets: string;
+        totalCurrentLiabilities: string;
+        cashAndCashEquivalentsAtCarryingValue: string;
+        longTermDebt: string;
+    }>;
+}
+
+interface AlphaVantageCashFlow {
+    symbol: string;
+    annualReports?: Array<{
+        fiscalDateEnding: string;
+        operatingCashflow: string;
+        cashflowFromInvestment: string;
+        cashflowFromFinancing: string;
+    }>;
+    quarterlyReports?: Array<{
+        fiscalDateEnding: string;
+        operatingCashflow: string;
+        cashflowFromInvestment: string;
+        cashflowFromFinancing: string;
+    }>;
+}
+
+/**
+ * Rate limiting and quota management
+ */
+const RATE_LIMIT_DELAY = 12000; // 12 seconds = 5 requests/minute (free tier limit)
+const REQUEST_TIMEOUT = 10000;  // 10 seconds timeout
+const DAILY_LIMIT = 25;         // Free tier daily limit
+const DAILY_LIMIT_WARNING = 20; // Warn when approaching limit
+
+let dailyRequestCount = 0;
+let lastResetDate = new Date().toDateString();
+let lastRequestTime = 0;
+
+/**
+ * Check and reset daily counter if new day
+ */
+function checkAndResetCounter(): void {
+    const today = new Date().toDateString();
+    if (today !== lastResetDate) {
+        console.log(`🔄 [Alpha Vantage] Daily counter reset (was ${dailyRequestCount}/${DAILY_LIMIT})`);
+        dailyRequestCount = 0;
+        lastResetDate = today;
+    }
+}
+
+/**
+ * Respect rate limit (5 requests per minute)
+ */
+async function respectRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+
+    if (timeSinceLastRequest < RATE_LIMIT_DELAY) {
+        const waitTime = RATE_LIMIT_DELAY - timeSinceLastRequest;
+        console.log(`⏳ [Alpha Vantage] Rate limiting: waiting ${Math.round(waitTime / 1000)}s`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
+    lastRequestTime = Date.now();
+}
+
+/**
+ * Get Alpha Vantage API key
+ */
+function getApiKey(): string {
+    const apiKey = apiConfig.alphaVantage?.apiKey;
+    if (!apiKey || apiKey === 'demo') {
+        throw new APIError(
+            'Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable.',
+            {
+                suggestion: 'Get a free API key at https://www.alphavantage.co/support/#api-key',
+                code: 'MISSING_API_KEY'
+            }
+        );
+    }
+    return apiKey;
+}
+
+/**
+ * Normalize stock symbol
+ */
+function normalizeSymbol(symbol: string): string {
+    return symbol.toUpperCase().trim();
+}
+
+/**
+ * Validate stock symbol format
+ */
+function validateSymbol(symbol: string): void {
+    if (!symbol || typeof symbol !== 'string') {
+        throw new APIError('Invalid symbol format: Symbol is required', { symbol });
+    }
+
+    const normalized = normalizeSymbol(symbol);
+
+    // Basic validation: 1-5 uppercase letters
+    if (!/^[A-Z]{1,5}$/.test(normalized)) {
+        throw new APIError(
+            `Invalid symbol format: ${symbol}. Stock symbols should be 1-5 letters.`,
+            { symbol, normalized }
+        );
+    }
+}
+
+/**
+ * Parse number safely from string
+ */
+function parseNumber(value: string | number | undefined): number | undefined {
+    if (value === undefined || value === null || value === 'None' || value === '') {
+        return undefined;
+    }
+    const num = typeof value === 'string' ? parseFloat(value) : value;
+    return isNaN(num) ? undefined : num;
+}
+
+/**
+ * Make API request to Alpha Vantage with rate limiting and quota management
+ */
+async function makeAPICall<T>(
+    functionName: string,
+    symbol: string,
+    additionalParams: Record<string, string> = {}
+): Promise<T> {
+    // Check and reset counter if new day
+    checkAndResetCounter();
+
+    // Warn if approaching limit
+    if (dailyRequestCount >= DAILY_LIMIT_WARNING) {
+        console.warn(`⚠️ [Alpha Vantage] ${dailyRequestCount}/${DAILY_LIMIT} daily requests used`);
+    }
+
+    // Check if daily limit reached
+    if (dailyRequestCount >= DAILY_LIMIT) {
+        throw new APIError(
+            `Alpha Vantage daily limit reached (${dailyRequestCount}/${DAILY_LIMIT}). Data will refresh tomorrow or upgrade to Premium tier.`,
+            {
+                code: 'DAILY_LIMIT_REACHED',
+                limit: DAILY_LIMIT,
+                current: dailyRequestCount,
+                upgradeUrl: 'https://www.alphavantage.co/premium/',
+                resetTime: new Date(new Date().setHours(24, 0, 0, 0))
+            }
+        );
+    }
+
+    // Apply rate limiting
+    await respectRateLimit();
+
+    const apiKey = getApiKey();
+    const url = new URL(apiConfig.alphaVantage.baseUrl);
+    url.searchParams.append('function', functionName);
+    url.searchParams.append('symbol', symbol);
+    url.searchParams.append('apikey', apiKey);
+
+    for (const [key, value] of Object.entries(additionalParams)) {
+        url.searchParams.append(key, value);
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+    try {
+        const response = await fetch(url.toString(), {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+            },
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new APIError(
+                `Alpha Vantage API error: ${response.status} ${response.statusText}`,
+                { status: response.status, function: functionName }
+            );
+        }
+
+        const data = await response.json() as Record<string, unknown>;
+
+        // Check for Alpha Vantage error responses
+        if (data['Error Message']) {
+            throw new APIError(
+                `Alpha Vantage API error: ${data['Error Message']}`,
+                { code: 'ALPHA_VANTAGE_ERROR', response: data }
+            );
+        }
+
+        // Check for rate limit note
+        if (typeof data['Note'] === 'string' && data['Note'].includes('5 calls per minute')) {
+            throw new APIError(
+                'Alpha Vantage rate limit hit (5/min). Please wait 12 seconds.',
+                { code: 'RATE_LIMIT_HIT', retryAfter: 12000 }
+            );
+        }
+
+        // Check for information message (often means invalid symbol or no data)
+        if (data['Information']) {
+            throw new APIError(
+                `Alpha Vantage: ${data['Information']}`,
+                { code: 'NO_DATA', response: data }
+            );
+        }
+
+        // Increment counter AFTER successful call
+        dailyRequestCount++;
+        console.log(`📊 [Alpha Vantage] Request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
+
+        return data as T;
+
+    } catch (error: any) {
+        if (error.name === 'AbortError') {
+            throw new APIError(
+                `Request timeout for Alpha Vantage ${functionName}`,
+                { function: functionName, timeout: REQUEST_TIMEOUT }
+            );
+        }
+
+        if (error instanceof APIError) {
+            throw error;
+        }
+
+        throw new APIError(
+            `Alpha Vantage request failed: ${error.message}`,
+            { function: functionName, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Calculate fiscal quarter from date string
+ */
+function calculateQuarter(dateString: string): number {
+    const month = parseInt(dateString.substring(5, 7));
+    return Math.ceil(month / 3);
+}
+
+/**
+ * Internal: Fetch company overview from Alpha Vantage API (no caching)
+ */
+async function _fetchCompanyOverviewFromAPI(symbol: string): Promise<CompanyOverview> {
+    const startTime = Date.now();
+    const normalized = normalizeSymbol(symbol);
+
+    const response = await makeAPICall<AlphaVantageOverview>('OVERVIEW', normalized);
+
+    // Check if we got valid data
+    if (!response.Symbol || !response.Name) {
+        throw new APIError(
+            `Company not found: ${symbol}`,
+            { symbol: normalized, suggestion: 'Ensure the symbol is a valid US stock ticker' }
+        );
+    }
+
+    const overview: CompanyOverview = {
+        symbol: normalized,
+        name: response.Name,
+        description: response.Description || '',
+        sector: response.Sector || 'Unknown',
+        industry: response.Industry || 'Unknown',
+        marketCap: parseNumber(response.MarketCapitalization) || 0,
+        peRatio: parseNumber(response.PERatio),
+        eps: parseNumber(response.EPS),
+        dividendYield: parseNumber(response.DividendYield),
+        week52High: parseNumber(response['52WeekHigh']),
+        week52Low: parseNumber(response['52WeekLow']),
+        averageVolume: undefined, // Not provided by Alpha Vantage
+        beta: parseNumber(response.Beta),
+        exchange: response.Exchange,
+        currency: response.Currency,
+        country: response.Country,
+        ipo: undefined, // Not provided
+        weburl: response.OfficialSite,
+        logo: undefined, // Not provided
+        phone: undefined, // Not provided
+        timestamp: new Date(),
+    };
+
+    const responseTime = Date.now() - startTime;
+    console.log(`✅ [Alpha Vantage] Fetched ${symbol} overview from API in ${responseTime}ms`);
+
+    return overview;
+}
+
+/**
+ * Fetch company overview with caching (7-day TTL)
+ */
+export async function fetchCompanyOverview(symbol: string): Promise<CompanyOverview> {
+    validateSymbol(symbol);
+    const normalized = normalizeSymbol(symbol);
+
+    try {
+        const cache = getCacheService();
+
+        // Try cache first
+        const cached = await cache.fundamentals.get(normalized, 'overview');
+        if (cached) {
+            console.log(`📦 [Cache] Hit for ${symbol} overview (saved API call)`);
+            return cached as unknown as CompanyOverview;
+        }
+
+        // Cache miss - fetch from API
+        console.log(`📦 [Cache] Miss for ${symbol} overview - fetching from API`);
+        const overview = await _fetchCompanyOverviewFromAPI(symbol);
+
+        // Store in cache with 7-day TTL
+        await cache.fundamentals.set(normalized, 'overview', overview as any);
+        console.log(`📦 [Cache] Stored ${symbol} overview (TTL: 7 days)`);
+
+        return overview;
+
+    } catch (error: any) {
+        if (error instanceof APIError) {
+            throw error;
+        }
+        throw new APIError(
+            `Failed to fetch company overview for ${symbol}: ${error.message}`,
+            { symbol, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Internal: Fetch earnings data from Alpha Vantage API (no caching)
+ */
+async function _fetchEarningsFromAPI(symbol: string, limit: number): Promise<ExtendedEarningsData[]> {
+    const startTime = Date.now();
+    const normalized = normalizeSymbol(symbol);
+
+    const response = await makeAPICall<AlphaVantageEarningsResponse>('EARNINGS', normalized);
+
+    if (!response.quarterlyEarnings || response.quarterlyEarnings.length === 0) {
+        console.log(`[Alpha Vantage] No earnings data found for ${symbol}`);
+        return [];
+    }
+
+    // Sort by date descending and limit
+    const earnings = response.quarterlyEarnings
+        .slice(0, limit)
+        .map(e => {
+            const fiscalYear = parseInt(e.fiscalDateEnding.substring(0, 4));
+            const fiscalQuarter = calculateQuarter(e.fiscalDateEnding);
+
+            return {
+                symbol: normalized,
+                quarter: `Q${fiscalQuarter}`,
+                year: fiscalYear,
+                reportDate: new Date(e.reportedDate),
+                epsEstimate: parseNumber(e.estimatedEPS),
+                epsActual: parseNumber(e.reportedEPS),
+                revenueEstimate: undefined, // Not provided by Alpha Vantage
+                revenueActual: undefined, // Not provided by Alpha Vantage
+                surprise: parseNumber(e.surprise),
+                surprisePercent: parseNumber(e.surprisePercentage),
+                period: e.fiscalDateEnding,
+            };
+        });
+
+    const responseTime = Date.now() - startTime;
+    console.log(`✅ [Alpha Vantage] Fetched ${earnings.length} earnings from API in ${responseTime}ms`);
+
+    return earnings;
+}
+
+/**
+ * Fetch earnings data with caching (7-day TTL)
+ */
+export async function fetchEarnings(symbol: string, limit: number = 8): Promise<ExtendedEarningsData[]> {
+    validateSymbol(symbol);
+    const normalized = normalizeSymbol(symbol);
+    const dataType = `earnings:${limit}`;
+
+    try {
+        const cache = getCacheService();
+
+        // Try cache first
+        const cached = await cache.fundamentals.get(normalized, dataType);
+        if (cached) {
+            console.log(`📦 [Cache] Hit for ${symbol} earnings (saved API call)`);
+            return cached as unknown as ExtendedEarningsData[];
+        }
+
+        // Cache miss - fetch from API
+        console.log(`📦 [Cache] Miss for ${symbol} earnings - fetching from API`);
+        const earnings = await _fetchEarningsFromAPI(symbol, limit);
+
+        // Store in cache with 7-day TTL
+        await cache.fundamentals.set(normalized, dataType, earnings as any);
+        console.log(`📦 [Cache] Stored ${symbol} earnings (TTL: 7 days)`);
+
+        return earnings;
+
+    } catch (error: any) {
+        if (error instanceof APIError) {
+            throw error;
+        }
+        throw new APIError(
+            `Failed to fetch earnings for ${symbol}: ${error.message}`,
+            { symbol, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Internal: Fetch financial statements from Alpha Vantage API (no caching)
+ * Note: This requires 3 API calls
+ */
+async function _fetchFinancialStatementsFromAPI(
+    symbol: string,
+    period: 'annual' | 'quarterly',
+    limit: number
+): Promise<FinancialStatement[]> {
+    const startTime = Date.now();
+    const normalized = normalizeSymbol(symbol);
+
+    console.log(`📊 [Alpha Vantage] Fetching ${period} financials from API for ${symbol} (3 API calls)...`);
+
+    // Fetch all three statements SEQUENTIALLY (Alpha Vantage requires 1 request/second for free tier)
+    const incomeResponse = await makeAPICall<AlphaVantageIncomeStatement>('INCOME_STATEMENT', normalized);
+    const balanceResponse = await makeAPICall<AlphaVantageBalanceSheet>('BALANCE_SHEET', normalized);
+    const cashFlowResponse = await makeAPICall<AlphaVantageCashFlow>('CASH_FLOW', normalized);
+
+    // Get the appropriate reports based on period
+    const incomeReports = period === 'annual'
+        ? incomeResponse.annualReports || []
+        : incomeResponse.quarterlyReports || [];
+
+    const balanceReports = period === 'annual'
+        ? balanceResponse.annualReports || []
+        : balanceResponse.quarterlyReports || [];
+
+    const cashFlowReports = period === 'annual'
+        ? cashFlowResponse.annualReports || []
+        : cashFlowResponse.quarterlyReports || [];
+
+    if (incomeReports.length === 0) {
+        console.log(`[Alpha Vantage] No ${period} financial statements found for ${symbol}`);
+        return [];
+    }
+
+    // Merge statements by fiscal date
+    const statements: FinancialStatement[] = [];
+
+    for (let i = 0; i < Math.min(limit, incomeReports.length); i++) {
+        const income = incomeReports[i];
+        const balance = balanceReports.find(b => b.fiscalDateEnding === income.fiscalDateEnding);
+        const cashFlow = cashFlowReports.find(c => c.fiscalDateEnding === income.fiscalDateEnding);
+
+        const fiscalYear = parseInt(income.fiscalDateEnding.substring(0, 4));
+        const fiscalQuarter = period === 'quarterly' ? calculateQuarter(income.fiscalDateEnding) : undefined;
+
+        const revenue = parseNumber(income.totalRevenue);
+        const grossProfit = parseNumber(income.grossProfit);
+        const operatingIncome = parseNumber(income.operatingIncome);
+        const netIncome = parseNumber(income.netIncome);
+
+        statements.push({
+            symbol: normalized,
+            fiscalYear,
+            fiscalQuarter,
+            period,
+            reportDate: new Date(income.fiscalDateEnding),
+
+            // Balance Sheet
+            totalAssets: balance ? parseNumber(balance.totalAssets) : undefined,
+            totalLiabilities: balance ? parseNumber(balance.totalLiabilities) : undefined,
+            totalEquity: balance ? parseNumber(balance.totalShareholderEquity) : undefined,
+            totalDebt: balance ? parseNumber(balance.longTermDebt) : undefined,
+            currentAssets: balance ? parseNumber(balance.totalCurrentAssets) : undefined,
+            currentLiabilities: balance ? parseNumber(balance.totalCurrentLiabilities) : undefined,
+            cash: balance ? parseNumber(balance.cashAndCashEquivalentsAtCarryingValue) : undefined,
+
+            // Income Statement
+            revenue,
+            costOfRevenue: parseNumber(income.costOfRevenue),
+            grossProfit,
+            operatingIncome,
+            netIncome,
+            ebitda: parseNumber(income.ebitda),
+
+            // Cash Flow
+            operatingCashFlow: cashFlow ? parseNumber(cashFlow.operatingCashflow) : undefined,
+            investingCashFlow: cashFlow ? parseNumber(cashFlow.cashflowFromInvestment) : undefined,
+            financingCashFlow: cashFlow ? parseNumber(cashFlow.cashflowFromFinancing) : undefined,
+            freeCashFlow: undefined, // Calculate if needed
+
+            // Margins (calculated)
+            grossMargin: revenue && grossProfit ? (grossProfit / revenue) * 100 : undefined,
+            operatingMargin: revenue && operatingIncome ? (operatingIncome / revenue) * 100 : undefined,
+            netMargin: revenue && netIncome ? (netIncome / revenue) * 100 : undefined,
+
+            timestamp: new Date(),
+        });
+    }
+
+    const responseTime = Date.now() - startTime;
+    console.log(`✅ [Alpha Vantage] Fetched ${statements.length} ${period} statements from API in ${responseTime}ms`);
+
+    return statements;
+}
+
+/**
+ * Fetch financial statements with caching (7-day TTL)
+ * Note: Uses 3 API calls on cache miss - caching is especially valuable here!
+ */
+export async function fetchFinancialStatements(
+    symbol: string,
+    period: 'annual' | 'quarterly' = 'annual',
+    limit: number = 4
+): Promise<FinancialStatement[]> {
+    validateSymbol(symbol);
+    const normalized = normalizeSymbol(symbol);
+    const dataType = `statements:${period}:${limit}`;
+
+    try {
+        const cache = getCacheService();
+
+        // Try cache first - especially important for financial statements (3 API calls!)
+        const cached = await cache.fundamentals.get(normalized, dataType);
+        if (cached) {
+            console.log(`📦 [Cache] Hit for ${symbol} ${period} statements (saved 3 API calls!)`);
+            return cached as unknown as FinancialStatement[];
+        }
+
+        // Cache miss - fetch from API
+        console.log(`📦 [Cache] Miss for ${symbol} ${period} statements - fetching from API`);
+        const statements = await _fetchFinancialStatementsFromAPI(symbol, period, limit);
+
+        // Store in cache with 7-day TTL
+        await cache.fundamentals.set(normalized, dataType, statements as any);
+        console.log(`📦 [Cache] Stored ${symbol} ${period} statements (TTL: 7 days)`);
+
+        return statements;
+
+    } catch (error: any) {
+        if (error instanceof APIError) {
+            throw error;
+        }
+        throw new APIError(
+            `Failed to fetch financial statements for ${symbol}: ${error.message}`,
+            { symbol, period, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Fetch full fundamentals (overview + earnings)
+ * Note: Financial statements excluded by default due to 3 API calls
+ */
+export async function fetchFullFundamentals(symbol: string): Promise<{
+    overview: CompanyOverview;
+    earnings: ExtendedEarningsData[];
+    metrics: {
+        profitability: {
+            grossMargin?: number;
+            operatingMargin?: number;
+            netMargin?: number;
+            roe?: number;
+            roa?: number;
+        };
+        valuation: {
+            peRatio?: number;
+            eps?: number;
+            dividendYield?: number;
+        };
+        liquidity: {
+            currentRatio?: number;
+            quickRatio?: number;
+        };
+        leverage: {
+            debtToEquity?: number;
+        };
+        growth: {
+            epsGrowth3Y?: number;
+            epsGrowth5Y?: number;
+        };
+    };
+    timestamp: Date;
+}> {
+    const startTime = Date.now();
+    validateSymbol(symbol);
+    const normalized = normalizeSymbol(symbol);
+
+    try {
+        // Fetch overview and earnings in parallel (2 API calls)
+        const [overview, earnings] = await Promise.all([
+            fetchCompanyOverview(normalized),
+            fetchEarnings(normalized, 8),
+        ]);
+
+        // Build metrics from overview data
+        const metrics = {
+            profitability: {
+                grossMargin: undefined,
+                operatingMargin: undefined,
+                netMargin: undefined,
+                roe: undefined,
+                roa: undefined,
+            },
+            valuation: {
+                peRatio: overview.peRatio,
+                eps: overview.eps,
+                dividendYield: overview.dividendYield,
+            },
+            liquidity: {
+                currentRatio: undefined,
+                quickRatio: undefined,
+            },
+            leverage: {
+                debtToEquity: undefined,
+            },
+            growth: {
+                epsGrowth3Y: undefined,
+                epsGrowth5Y: undefined,
+            },
+        };
+
+        const result = {
+            overview,
+            earnings,
+            metrics,
+            timestamp: new Date(),
+        };
+
+        const responseTime = Date.now() - startTime;
+        console.log(`✅ [Alpha Vantage] Fetched full fundamentals for ${symbol} in ${responseTime}ms`);
+
+        return result;
+
+    } catch (error: any) {
+        if (error instanceof APIError) {
+            throw error;
+        }
+        throw new APIError(
+            `Failed to fetch full fundamentals for ${symbol}: ${error.message}`,
+            { symbol, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Check if Alpha Vantage API is configured
+ */
+export function isAlphaVantageConfigured(): boolean {
+    const apiKey = apiConfig.alphaVantage?.apiKey;
+    return !!apiKey && apiKey !== 'demo' && apiKey.length > 0;
+}
+
+/**
+ * Get daily usage statistics
+ */
+export function getDailyUsageStats(): {
+    used: number;
+    limit: number;
+    remaining: number;
+    resetTime: Date;
+} {
+    checkAndResetCounter();
+    return {
+        used: dailyRequestCount,
+        limit: DAILY_LIMIT,
+        remaining: DAILY_LIMIT - dailyRequestCount,
+        resetTime: new Date(new Date().setHours(24, 0, 0, 0)),
+    };
+}
+
+/**
+ * List of supported major stocks (same as Finnhub)
+ */
+export const SUPPORTED_STOCKS = [
+    // Tech
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA', 'AMD', 'INTC', 'CRM',
+    // Finance
+    'JPM', 'BAC', 'GS', 'V', 'MA', 'WFC', 'C', 'AXP', 'BLK', 'MS',
+    // Consumer
+    'WMT', 'HD', 'DIS', 'NKE', 'SBUX', 'MCD', 'KO', 'PEP', 'COST', 'TGT',
+    // Healthcare
+    'JNJ', 'UNH', 'PFE', 'ABBV', 'MRK', 'LLY', 'TMO', 'DHR', 'BMY', 'AMGN',
+    // Energy
+    'XOM', 'CVX', 'COP', 'SLB', 'EOG',
+];
+
+/**
+ * Check if a symbol is in our supported list
+ */
+export function isSupportedStock(symbol: string): boolean {
+    return SUPPORTED_STOCKS.includes(normalizeSymbol(symbol));
+}
