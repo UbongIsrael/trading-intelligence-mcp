@@ -190,7 +190,7 @@ function formatContextualAnalysis(data: any): string {
     lines.push('💰 YoY Changes:');
     if (data.yoyChanges && Array.isArray(data.yoyChanges)) {
         data.yoyChanges.forEach((c: YoYComparison) => {
-            if (c.severity !== 'minor' && c.metric !== 'revenue') { // Revenue usually in headline or shown explicitly
+            if (c.severity !== 'minor' && c.metric !== 'revenue') {
                 let emoji = '';
                 if (c.direction === 'up') emoji = '↑';
                 if (c.direction === 'down') emoji = '↓';
@@ -200,9 +200,11 @@ function formatContextualAnalysis(data: any): string {
                 else if (c.metric.includes('Margin') && c.change < 0) indicator = '⚠️';
                 else if (c.metric === 'revenue' && c.direction === 'up') indicator = '✅';
 
-                lines.push(`  ${c.metric}: ${emoji} ${c.changePercent.toFixed(1)}% ${indicator}`);
+                lines.push(`  ${formatMetricName(c.metric)}: ${emoji} ${c.changePercent.toFixed(1)}% ${indicator}`);
             } else if (c.metric === 'revenue') {
-                lines.push(`  Revenue: ${c.direction === 'up' ? '↑' : '↓'} ${c.changePercent.toFixed(1)}% ($${formatLargeNumber(c.change)}) ${c.direction === 'up' ? '✅' : ''}`);
+                const changeStr = `$${formatLargeNumber(Math.abs(c.change))}`;
+                const dirStr = c.change > 0 ? 'increase' : 'decrease';
+                lines.push(`  Revenue: ${c.direction === 'up' ? '↑' : '↓'} ${c.changePercent.toFixed(1)}% (${changeStr} ${dirStr}) ${c.direction === 'up' ? '✅' : ''}`);
             }
         });
     }
@@ -216,21 +218,40 @@ function formatContextualAnalysis(data: any): string {
             lines.push(`    - ${p.description}`);
             if (p.recommendation) lines.push(`    - Monitor: ${p.recommendation}`);
         });
-        lines.push('');
+    } else {
+        lines.push('✅ Patterns Detected: None - Strong financial health');
     }
+    lines.push('');
 
     // Insider Activity
     if (data.insiderActivity) {
         lines.push(`👥 Insider Activity (Last 90 days):`);
         const ia = data.insiderActivity;
 
+        let netValueString = '';
+        const buyVal = ia.buyingActivity?.totalValue || 0;
+        const sellVal = ia.sellingActivity?.totalValue || 0;
+        const netVal = buyVal - sellVal;
+
+        if (Math.abs(netVal) > 0) {
+            netValueString = `$${formatLargeNumber(Math.abs(netVal))}`;
+        } else {
+            netValueString = '$0';
+        }
+
         let sentimentEmoji = '😐';
         if (ia.sentiment === 'bullish') sentimentEmoji = '🟢';
         if (ia.sentiment === 'bearish') sentimentEmoji = '🔴';
 
-        lines.push(`  Net Activity: ${ia.netActivity.replace('_', ' ')} ${sentimentEmoji}`);
-        if (ia.pattern !== 'routine') lines.push(`  Pattern: ${ia.pattern} ⚠️`);
-        else lines.push(`  Pattern: Routine`);
+        const activityLabel = ia.netActivity === 'net_selling' ? 'Net Selling' :
+            ia.netActivity === 'net_buying' ? 'Net Buying' : 'Net Activity';
+
+        lines.push(`  ${activityLabel}: ${netValueString} (${ia.pattern}) ${sentimentEmoji}`);
+        if (ia.pattern === 'routine') {
+            lines.push(`  Pattern: Quarterly routine transactions (not concerning)`);
+        } else {
+            lines.push(`  Pattern: ${ia.pattern} ⚠️`);
+        }
 
         lines.push('');
     }
@@ -239,7 +260,9 @@ function formatContextualAnalysis(data: any): string {
     if (data.recentEvents && data.recentEvents.length > 0) {
         lines.push('📰 Recent Events:');
         data.recentEvents.slice(0, 3).forEach((e: MaterialEvent) => {
-            lines.push(`  • ${e.description} (${new Date(e.filingDate).toLocaleDateString()})`);
+            const dateStr = new Date(e.filingDate).toLocaleDateString();
+            const importanceStr = e.importance === 'high' ? '- High importance' : '';
+            lines.push(`  • ${e.description} (${dateStr}) ${importanceStr}`);
         });
         lines.push('');
     }
@@ -253,9 +276,18 @@ function formatContextualAnalysis(data: any): string {
         lines.push('');
     }
 
-    lines.push(`Sentiment: ${data.sentiment.toUpperCase()}`);
+    let sentimentLabel = data.sentiment.toUpperCase();
+    if (data.sentiment === 'bullish' && data.yoyChanges?.some((c: any) => c.metric === 'revenue' && c.changePercent > 50)) {
+        sentimentLabel = 'STRONGLY BULLISH';
+    }
+
+    lines.push(`Sentiment: ${sentimentLabel}`);
 
     return lines.join('\n');
+}
+
+function formatMetricName(key: string): string {
+    return key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
 }
 
 /**
