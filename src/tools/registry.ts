@@ -20,6 +20,8 @@ import {
   registerFinancialStatementsTool,
   registerFullFundamentalsTool,
 } from './fundamentals-tool.js';
+import { registerContextualFundamentalsTool } from './contextual-fundamentals-tool.js';
+
 import {
   registerLiquidityZonesTool,
   registerSupportResistanceTool,
@@ -67,13 +69,13 @@ export async function registerTools(server: McpServer): Promise<void> {
     // System tools
     console.log('  Registering system tools...');
     await registerHealthCheckTool(server);
-    
+
     // Price aggregation tools
     console.log('  Registering price tools...');
     registerPriceTool(server);
     registerBatchPriceTool(server);
     registerInvalidatePriceTool(server);
-    
+
     // Funding rate tools
     console.log('  Registering funding rate tools...');
     registerFundingRateTool(server);
@@ -81,14 +83,15 @@ export async function registerTools(server: McpServer): Promise<void> {
     registerAllFundingRatesTool(server);
     registerFundingRateStatsTool(server);
     registerSupportedPerpetualsTool(server);
-    
+
     // Fundamental data tools
     console.log('  Registering fundamentals tools...');
     registerCompanyOverviewTool(server);
     registerEarningsTool(server);
     registerFinancialStatementsTool(server);
     registerFullFundamentalsTool(server);
-    
+    registerContextualFundamentalsTool(server);
+
     // Liquidity zones / Technical analysis tools
     console.log('  Registering liquidity zones tools...');
     registerLiquidityZonesTool(server);
@@ -96,12 +99,12 @@ export async function registerTools(server: McpServer): Promise<void> {
     registerPriceLevelAnalysisTool(server);
     registerQuickSupportResistanceTool(server);
     registerAvailableTimeframesTool(server);
-    
+
     // Future tool categories will be added here:
     // - News & sentiment tools (Wave 5)
-    
+
     console.log(`\n📊 Total tools registered: ${toolRegistry.length}`);
-    
+
   } catch (error) {
     console.error('Failed to register tools:', error);
     throw error;

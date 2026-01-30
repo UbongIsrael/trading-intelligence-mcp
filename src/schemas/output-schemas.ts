@@ -14,39 +14,39 @@
 export const PriceOutputSchema = {
   type: "object" as const,
   properties: {
-    symbol: { 
+    symbol: {
       type: "string" as const,
       description: "Asset symbol (e.g., AAPL, BTC)"
     },
-    price: { 
+    price: {
       type: "number" as const,
       description: "Current price in USD"
     },
-    change: { 
+    change: {
       type: "number" as const,
       description: "Price change in USD"
     },
-    changePercent: { 
+    changePercent: {
       type: "number" as const,
       description: "Price change percentage"
     },
-    volume: { 
+    volume: {
       type: "number" as const,
       description: "Trading volume"
     },
-    marketCap: { 
+    marketCap: {
       type: "number" as const,
       description: "Market capitalization"
     },
-    timestamp: { 
+    timestamp: {
       type: "string" as const,
       description: "ISO 8601 timestamp"
     },
-    source: { 
+    source: {
       type: "string" as const,
       description: "Data source (yahoo_finance, coingecko)"
     },
-    cached: { 
+    cached: {
       type: "boolean" as const,
       description: "Whether data was served from cache"
     }
@@ -61,7 +61,7 @@ export const BatchPricesOutputSchema = {
       type: "array" as const,
       items: PriceOutputSchema
     },
-    timestamp: { 
+    timestamp: {
       type: "string" as const,
       description: "ISO 8601 timestamp of batch query"
     }
@@ -75,35 +75,35 @@ export const BatchPricesOutputSchema = {
 export const FundingRateOutputSchema = {
   type: "object" as const,
   properties: {
-    symbol: { 
+    symbol: {
       type: "string" as const,
       description: "Perpetual futures symbol"
     },
-    fundingRate: { 
+    fundingRate: {
       type: "number" as const,
       description: "Current funding rate (decimal)"
     },
-    fundingRatePercent: { 
+    fundingRatePercent: {
       type: "string" as const,
       description: "Funding rate as percentage string"
     },
-    nextFundingTime: { 
+    nextFundingTime: {
       type: "string" as const,
       description: "ISO 8601 timestamp of next funding"
     },
-    interpretation: { 
+    interpretation: {
       type: "string" as const,
       description: "Sentiment interpretation (e.g., 'Bullish', 'Neutral')"
     },
-    annualizedRate: { 
+    annualizedRate: {
       type: "string" as const,
       description: "Annualized funding rate percentage"
     },
-    source: { 
+    source: {
       type: "string" as const,
       description: "Exchange source (binance)"
     },
-    cached: { 
+    cached: {
       type: "boolean" as const
     }
   },
@@ -192,7 +192,7 @@ export const FullFundamentalsOutputSchema = {
     symbol: { type: "string" as const },
     overview: CompanyOverviewOutputSchema,
     earnings: EarningsOutputSchema,
-    summary: { 
+    summary: {
       type: "string" as const,
       description: "AI-generated summary of key metrics"
     },
@@ -334,4 +334,87 @@ export const CacheInvalidationOutputSchema = {
     message: { type: "string" as const }
   },
   required: ["symbol", "invalidated", "message"]
+};
+
+/**
+ * Contextual Analysis Output Schema (Phase 2)
+ */
+export const ContextualFundamentalsOutputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: { type: "string" as const, description: "Stock symbol" },
+    headline: { type: "string" as const, description: "One-line contextual summary" },
+    yoyChanges: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          metric: { type: "string" as const },
+          currentValue: { type: "number" as const },
+          previousValue: { type: "number" as const },
+          change: { type: "number" as const },
+          changePercent: { type: "number" as const },
+          isSignificant: { type: "boolean" as const },
+          direction: { type: "string" as const, enum: ["up", "down", "flat"] as const },
+          severity: { type: "string" as const, enum: ["major", "moderate", "minor"] as const },
+          insight: { type: "string" as const }
+        },
+        required: ["metric", "changePercent", "direction"]
+      }
+    },
+    patterns: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          type: { type: "string" as const },
+          severity: { type: "string" as const, enum: ["critical", "warning", "info"] as const },
+          description: { type: "string" as const },
+          metrics: { type: "array" as const, items: { type: "string" as const } },
+          recommendation: { type: "string" as const },
+        },
+        required: ["type", "description"]
+      }
+    },
+    insiderActivity: {
+      type: "object" as const,
+      properties: {
+        netActivity: { type: "string" as const, enum: ["net_buying", "net_selling", "neutral"] as const },
+        pattern: { type: "string" as const, enum: ["routine", "unusual", "clustered"] as const },
+        sentiment: { type: "string" as const, enum: ["bullish", "bearish", "neutral"] as const },
+        buyingActivity: {
+          type: "object" as const,
+          properties: {
+            totalShares: { type: "number" as const },
+            totalValue: { type: "number" as const },
+            transactionCount: { type: "number" as const },
+          }
+        },
+        sellingActivity: {
+          type: "object" as const,
+          properties: {
+            totalShares: { type: "number" as const },
+            totalValue: { type: "number" as const },
+            transactionCount: { type: "number" as const },
+          }
+        },
+      }
+    },
+    recentEvents: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          filingDate: { type: "string" as const },
+          eventType: { type: "string" as const },
+          description: { type: "string" as const },
+          importance: { type: "string" as const, enum: ["high", "medium", "low"] as const },
+          url: { type: "string" as const },
+        }
+      }
+    },
+    keyInsights: { type: "array" as const, items: { type: "string" as const } },
+    sentiment: { type: "string" as const, enum: ["bullish", "bearish", "neutral"] as const },
+  },
+  required: ["symbol", "headline", "yoyChanges", "patterns", "keyInsights", "sentiment"],
 };
