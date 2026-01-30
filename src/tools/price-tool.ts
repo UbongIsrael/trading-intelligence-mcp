@@ -1,6 +1,6 @@
 /**
  * Price Tool
- * MCP tool for fetching asset prices
+ * MCP tool for fetching asset prices with Data Broker Standard compliance
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -8,6 +8,7 @@ import * as z from 'zod/v4';
 import { addToRegistry } from './registry.js';
 import { getPrice, getMultiplePrices, invalidatePrice } from '../services/prices.js';
 import { PriceData } from '../types.js';
+import { PriceOutputSchema, BatchPricesOutputSchema, CacheInvalidationOutputSchema } from '../schemas/output-schemas.js';
 
 /**
  * Input schema for price tool
@@ -44,6 +45,7 @@ export function registerPriceTool(server: McpServer): void {
       title: 'Get Asset Price',
       description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
       inputSchema: PriceInputSchema,
+      outputSchema: PriceOutputSchema as any, // Context Protocol requirement
     },
     async ({ symbol, assetType }) => {
       const startTime = Date.now();
@@ -54,6 +56,19 @@ export function registerPriceTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Price Tool] Fetched ${symbol} in ${responseTime}ms (cached: ${result.cached})`);
 
+        // Create structured response
+        const structuredData = {
+          symbol: result.data.symbol,
+          price: result.data.price,
+          change: result.data.change24h || 0,
+          changePercent: result.data.changePercent24h || 0,
+          volume: result.data.volume24h || 0,
+          marketCap: result.data.marketCap || 0,
+          timestamp: result.data.timestamp.toISOString(),
+          source: result.data.source,
+          cached: result.cached,
+        };
+
         return {
           content: [
             {
@@ -61,6 +76,7 @@ export function registerPriceTool(server: McpServer): void {
               text: formatPriceResponse(result.data, result.cached),
             },
           ],
+          structuredContent: structuredData, // REQUIRED by Context Protocol
         };
 
       } catch (error: any) {
@@ -71,6 +87,7 @@ export function registerPriceTool(server: McpServer): void {
               text: `Error fetching price for ${symbol}: ${error.message}`,
             },
           ],
+          isError: true,
         };
       }
     }
@@ -94,6 +111,7 @@ export function registerBatchPriceTool(server: McpServer): void {
       title: 'Get Multiple Asset Prices',
       description: 'Get current price data for multiple stocks or cryptocurrencies at once. Maximum 50 symbols. Data is cached for 5 minutes.',
       inputSchema: BatchPriceInputSchema,
+      outputSchema: BatchPricesOutputSchema as any, // Context Protocol requirement
     },
     async ({ symbols, assetType }) => {
       const startTime = Date.now();
@@ -104,23 +122,45 @@ export function registerBatchPriceTool(server: McpServer): void {
 
         const successCount = results.size;
         const failedCount = symbols.length - successCount;
-        const pricesData: PriceData[] = [];
         const cachedCount = Array.from(results.values()).filter(r => r.cached).length;
 
-        for (const result of results.values()) {
-          pricesData.push(result.data);
-        }
+        // Build structured data array
+        const pricesArray = Array.from(results.values()).map(result => ({
+          symbol: result.data.symbol,
+          price: result.data.price,
+          change: result.data.change24h || 0,
+          changePercent: result.data.changePercent24h || 0,
+          volume: result.data.volume24h || 0,
+          marketCap: result.data.marketCap || 0,
+          timestamp: result.data.timestamp.toISOString(),
+          source: result.data.source,
+          cached: result.cached,
+        }));
 
         const responseTime = Date.now() - startTime;
         console.log(`[Batch Price Tool] Fetched ${successCount}/${symbols.length} prices in ${responseTime}ms (cached: ${cachedCount})`);
+
+        const structuredData = {
+          prices: pricesArray,
+          timestamp: new Date().toISOString(),
+        };
 
         return {
           content: [
             {
               type: 'text',
-              text: formatBatchPriceResponse(pricesData, successCount, failedCount, cachedCount),
+              text: formatBatchPriceResponse(pricesArray.map(p => ({
+                symbol: p.symbol,
+                price: p.price,
+                changePercent24h: p.changePercent,
+                marketCap: p.marketCap,
+                source: p.source,
+                timestamp: new Date(p.timestamp),
+                currency: 'USD',
+              }) as PriceData), successCount, failedCount, cachedCount),
             },
           ],
+          structuredContent: structuredData, // REQUIRED by Context Protocol
         };
 
       } catch (error: any) {
@@ -131,6 +171,7 @@ export function registerBatchPriceTool(server: McpServer): void {
               text: `Error fetching batch prices: ${error.message}`,
             },
           ],
+          isError: true,
         };
       }
     }
@@ -156,20 +197,28 @@ export function registerInvalidatePriceTool(server: McpServer): void {
       inputSchema: z.object({
         symbol: z.string().min(1).describe('Asset symbol to invalidate'),
       }),
+      outputSchema: CacheInvalidationOutputSchema as any, // Context Protocol requirement
     },
     async ({ symbol }) => {
       try {
         const invalidated = await invalidatePrice(symbol);
 
+        const structuredData = {
+          symbol,
+          invalidated,
+          message: invalidated
+            ? `Cache invalidated for ${symbol}`
+            : `No cache found for ${symbol}`,
+        };
+
         return {
           content: [
             {
               type: 'text',
-              text: invalidated
-                ? `Cache invalidated for ${symbol}`
-                : `No cache found for ${symbol}`,
+              text: structuredData.message,
             },
           ],
+          structuredContent: structuredData, // REQUIRED by Context Protocol
         };
 
       } catch (error: any) {
@@ -180,6 +229,7 @@ export function registerInvalidatePriceTool(server: McpServer): void {
               text: `Error invalidating cache for ${symbol}: ${error.message}`,
             },
           ],
+          isError: true,
         };
       }
     }

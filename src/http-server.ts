@@ -1,11 +1,13 @@
 /**
  * HTTP Server for Context Protocol Integration
- * Provides SSE and HTTP Streaming transports for MCP with security middleware
+ * Uses StreamableHTTP transport as required by Context Protocol
  */
 
+import { randomUUID } from 'node:crypto';
 import express, { Request, Response } from 'express';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createContextMiddleware } from '@ctxprotocol/sdk';
 import { config, mcpMetadata, validateConfig, logConfigSummary } from './config.js';
 import { registerTools } from './tools/registry.js';
@@ -13,23 +15,26 @@ import { initializeRedis, shutdownRedis } from './cache/index.js';
 
 /**
  * HTTP-based MCP Server for Context Protocol
- * Implements Data Broker Standard with output schemas
+ * Implements Data Broker Standard with StreamableHTTPServerTransport
  */
 export class HttpMcpServer {
   private app: express.Application;
   private mcpServer: McpServer;
   private port: number;
   private server: any;
+  private transports: Record<string, StreamableHTTPServerTransport> = {};
 
   constructor() {
     this.app = express();
     this.port = config.port;
 
-    // Initialize MCP server
-    this.mcpServer = new McpServer({
-      name: mcpMetadata.name,
-      version: mcpMetadata.version,
-    });
+    // Initialize MCP server with capabilities
+    this.mcpServer = new McpServer(
+      {
+        name: mcpMetadata.name,
+        version: mcpMetadata.version,
+      }
+    );
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -43,7 +48,7 @@ export class HttpMcpServer {
     this.app.use((req, res, next) => {
       res.header('Access-Control-Allow-Origin', '*');
       res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id');
 
       if (req.method === 'OPTIONS') {
         res.sendStatus(200);
@@ -57,7 +62,7 @@ export class HttpMcpServer {
 
     // Request logging
     this.app.use((req, _res, next) => {
-      console.log(`${req.method} ${req.path}`);
+      console.log(`${req.method} ${req.path} ${req.headers['mcp-session-id'] ? `[Session: ${req.headers['mcp-session-id']}]` : ''}`);
       next();
     });
   }
@@ -66,6 +71,9 @@ export class HttpMcpServer {
    * Setup routes for Context Protocol
    */
   private setupRoutes(): void {
+    // Create Context Protocol security middleware
+    const verifyContextAuth = createContextMiddleware();
+
     // Health check endpoint - No auth required
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
@@ -74,6 +82,9 @@ export class HttpMcpServer {
         name: mcpMetadata.name,
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
+        transport: 'StreamableHTTP',
+        dataBokerStandard: true,
+        securityEnabled: true,
       });
     });
 
@@ -85,75 +96,73 @@ export class HttpMcpServer {
         description: mcpMetadata.description,
         endpoints: {
           health: '/health',
-          sse: '/sse',
-          mcp: '/mcp',
+          mcp: '/mcp (POST & GET)',
         },
+        transport: 'StreamableHTTP',
         documentation: 'https://github.com/your-repo/trading-intelligence-mcp',
-        dataBokerStandard: true, // Indicates output schemas are defined
-        securityEnabled: true, // Context Protocol JWT authentication
+        dataBokerStandard: true,
+        securityEnabled: true,
       });
     });
 
-    // SSE endpoint for Context Protocol - With authentication
-    this.app.get('/sse', createContextMiddleware(), async (req: Request, res: Response) => {
-      console.log('📡 New authenticated SSE connection from Context Protocol');
+    // MCP endpoint (POST) - With authentication
+    // This is the main endpoint Context Protocol uses
+    this.app.post('/mcp', verifyContextAuth, async (req: Request, res: Response) => {
+      console.log('📡 MCP POST request (authenticated)');
 
       try {
-        // Create SSE transport
-        const transport = new SSEServerTransport('/messages', res);
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+        let transport: StreamableHTTPServerTransport;
 
-        // Connect MCP server to this transport
-        await this.mcpServer.connect(transport);
+        if (sessionId && this.transports[sessionId]) {
+          // Use existing session
+          transport = this.transports[sessionId];
+          console.log(`🔄 Using existing session: ${sessionId}`);
+        } else if (!sessionId && isInitializeRequest(req.body)) {
+          // Create new session
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (id) => {
+              this.transports[id] = transport;
+              console.log(`✅ New session initialized: ${id}`);
+            },
+          });
+          await this.mcpServer.connect(transport);
+        } else {
+          console.error('❌ Invalid session - no session ID and not initialize request');
+          res.status(400).json({ error: 'Invalid session' });
+          return;
+        }
 
-        console.log('✅ SSE transport connected');
-
-        // Handle client disconnect
-        req.on('close', () => {
-          console.log('📴 SSE client disconnected');
-        });
-
+        await transport.handleRequest(req, res, req.body);
       } catch (error) {
-        console.error('❌ SSE connection error:', error);
-        res.status(500).json({ error: 'Failed to establish SSE connection' });
+        console.error('❌ MCP POST error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal server error' });
+        }
       }
     });
 
-    // Message endpoint for SSE transport - With authentication
-    this.app.post('/messages', createContextMiddleware(), express.text({ type: '*/*' }), async (_req: Request, res: Response) => {
-      console.log('📨 Received authenticated message via SSE transport');
-      // The SSE transport handles this internally
-      res.sendStatus(202);
-    });
-
-    // HTTP Streaming endpoint for Context Protocol - With authentication
-    this.app.post('/mcp', createContextMiddleware(), async (req: Request, res: Response) => {
-      console.log('📡 MCP HTTP Streaming request (authenticated)');
+    // MCP endpoint (GET) - With authentication
+    // Used for long-polling by Context Protocol
+    this.app.get('/mcp', verifyContextAuth, async (req: Request, res: Response) => {
+      console.log('📡 MCP GET request (authenticated) - long polling');
 
       try {
-        // For HTTP streaming, we'll handle requests directly
-        // This is a simplified implementation
-        const request = req.body;
+        const sessionId = req.headers['mcp-session-id'] as string;
+        const transport = this.transports[sessionId];
 
-        // Set streaming headers
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Transfer-Encoding', 'chunked');
-
-        // Process the MCP request
-        // Note: Full HTTP streaming requires more complex implementation
-        // For now, we'll send a response
-        res.json({
-          jsonrpc: '2.0',
-          id: request.id || 1,
-          result: { message: 'HTTP Streaming not fully implemented yet. Use /sse endpoint.' }
-        });
-
+        if (transport) {
+          await transport.handleRequest(req, res);
+        } else {
+          console.error(`❌ Invalid session ID: ${sessionId}`);
+          res.status(400).json({ error: 'Invalid session' });
+        }
       } catch (error) {
-        console.error('❌ MCP streaming error:', error);
-        res.status(500).json({
-          jsonrpc: '2.0',
-          id: req.body?.id || 1,
-          error: { message: 'Internal server error' }
-        });
+        console.error('❌ MCP GET error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal server error' });
+        }
       }
     });
 
@@ -162,7 +171,7 @@ export class HttpMcpServer {
       res.status(404).json({
         error: 'Not Found',
         message: `Endpoint ${req.path} not found`,
-        availableEndpoints: ['/', '/health', '/sse', '/mcp']
+        availableEndpoints: ['/', '/health', '/mcp']
       });
     });
   }
@@ -212,12 +221,12 @@ export class HttpMcpServer {
         console.log('🚀 HTTP MCP Server is running');
         console.log(`📡 Listening on port ${this.port}`);
         console.log('🔒 Context Protocol JWT authentication enabled');
+        console.log('🚂 Using StreamableHTTP transport (required by Context Protocol)');
         console.log('📊 Data Broker Standard compliant (output schemas defined)');
         console.log('');
         console.log('📊 Available Endpoints:');
-        console.log(`   Health: http://localhost:${this.port}/health`);
-        console.log(`   SSE:    http://localhost:${this.port}/sse (authenticated)`);
-        console.log(`   MCP:    http://localhost:${this.port}/mcp (authenticated)`);
+        console.log(`   Health: http://localhost:${this.port}/health (no auth)`);
+        console.log(`   MCP:    http://localhost:${this.port}/mcp (POST & GET, authenticated)`);
         console.log('');
         console.log('✨ Ready for Context Protocol requests');
         resolve();
@@ -230,6 +239,16 @@ export class HttpMcpServer {
    */
   async shutdown(): Promise<void> {
     console.log('\n👋 Shutting down server...');
+
+    // Close all active transports
+    for (const sessionId in this.transports) {
+      try {
+        await this.transports[sessionId].close();
+        console.log(`✅ Closed session: ${sessionId}`);
+      } catch (error) {
+        console.warn(`⚠️  Error closing session ${sessionId}:`, (error as Error).message);
+      }
+    }
 
     if (this.server) {
       await new Promise<void>((resolve) => {

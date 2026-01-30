@@ -10,11 +10,16 @@ import { TechnicalAnalysis } from '../types.js';
 import { getCacheService } from '../cache/index.js';
 import {
   calculateLiquidityZones,
-  getSupportResistanceLevels,
   getAvailableTimeframes,
   isValidSymbol,
   LiquidityZonesAnalysis,
 } from '../services/liquidity.js';
+import {
+  LiquidityZoneOutputSchema,
+  SupportResistanceOutputSchema,
+  PriceLevelAnalysisOutputSchema,
+  AvailableTimeframesOutputSchema
+} from '../schemas/output-schemas.js';
 
 /**
  * Input schema for liquidity zones tool
@@ -74,6 +79,7 @@ export function registerLiquidityZonesTool(server: McpServer): void {
       title: 'Get Liquidity Zones',
       description: 'Identify key support and resistance levels (liquidity zones) for any trading symbol. Returns the top 5 most significant price levels based on historical pivot points, with strength ratings and touch counts. Data cached for 30 minutes.',
       inputSchema: LiquidityZonesInputSchema,
+      outputSchema: LiquidityZoneOutputSchema as any,
     },
     async ({ symbol, timeframe, lookbackDays }) => {
       const startTime = Date.now();
@@ -113,13 +119,32 @@ export function registerLiquidityZonesTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Liquidity Tool] Fetched ${normalizedSymbol} in ${responseTime}ms (cached: ${result.cached})`);
 
+        const analysis = result.data as LiquidityZonesAnalysis;
+
+        const structuredData = {
+          symbol: analysis.symbol,
+          currentPrice: analysis.currentPrice,
+          timeframe: analysis.timeframe,
+          zones: analysis.liquidityZones.map(zone => ({
+            type: zone.type,
+            price: zone.price,
+            strength: zone.strength === 'strong' ? 0.9 : zone.strength === 'medium' ? 0.6 : 0.3,
+            touches: zone.touchCount,
+            distance: formatDistancePercent(zone.price, analysis.currentPrice),
+          })),
+          trend: analysis.trend || 'neutral',
+          recommendation: analysis.trend === 'bullish' ? 'Look for support bounces' : analysis.trend === 'bearish' ? 'Look for resistance rejections' : 'Range trade',
+          cached: result.cached,
+        };
+
         return {
           content: [
             {
               type: 'text',
-              text: formatLiquidityZonesResponse(result.data as LiquidityZonesAnalysis, result.cached),
+              text: formatLiquidityZonesResponse(analysis, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -153,6 +178,7 @@ export function registerSupportResistanceTool(server: McpServer): void {
       title: 'Get Support & Resistance',
       description: 'Get the nearest support and resistance levels for a trading symbol. Returns just the key levels closest to current price - perfect for quick trading decisions. Data cached for 30 minutes.',
       inputSchema: SupportResistanceInputSchema,
+      outputSchema: SupportResistanceOutputSchema as any,
     },
     async ({ symbol, timeframe }) => {
       const startTime = Date.now();
@@ -191,6 +217,22 @@ export function registerSupportResistanceTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[S/R Tool] Fetched ${normalizedSymbol} in ${responseTime}ms (cached: ${result.cached})`);
 
+        // Find strength for nearest levels
+        const supportZone = analysis.liquidityZones.find(z => z.type === 'support' && Math.abs(z.price - (analysis.nextSupport || 0)) < 0.001);
+        const resistanceZone = analysis.liquidityZones.find(z => z.type === 'resistance' && Math.abs(z.price - (analysis.nextResistance || 0)) < 0.001);
+
+        const supportStrengthVal = supportZone ? (supportZone.strength === 'strong' ? 0.9 : supportZone.strength === 'medium' ? 0.6 : 0.3) : 0.5;
+        const resistanceStrengthVal = resistanceZone ? (resistanceZone.strength === 'strong' ? 0.9 : resistanceZone.strength === 'medium' ? 0.6 : 0.3) : 0.5;
+
+        const structuredData = {
+          symbol: analysis.symbol,
+          currentPrice: analysis.currentPrice,
+          nearestSupport: analysis.nextSupport || 0,
+          nearestResistance: analysis.nextResistance || 0,
+          supportStrength: supportStrengthVal,
+          resistanceStrength: resistanceStrengthVal,
+        };
+
         return {
           content: [
             {
@@ -198,6 +240,7 @@ export function registerSupportResistanceTool(server: McpServer): void {
               text: formatSupportResistanceResponse(analysis, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -231,6 +274,7 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
       title: 'Analyze Price Levels',
       description: 'Get comprehensive price level analysis including all support/resistance zones, distances from current price, trend direction, and trading recommendations. Ideal for detailed technical analysis. Data cached for 30 minutes.',
       inputSchema: PriceLevelAnalysisInputSchema,
+      outputSchema: PriceLevelAnalysisOutputSchema as any,
     },
     async ({ symbol, currentPrice, timeframe }) => {
       const startTime = Date.now();
@@ -273,6 +317,24 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Price Level Tool] Analyzed ${normalizedSymbol} in ${responseTime}ms (cached: ${result.cached})`);
 
+        const structuredData = {
+          symbol: analysis.symbol,
+          currentPrice: effectiveCurrentPrice,
+          allZones: analysis.liquidityZones.map(zone => ({
+            type: zone.type,
+            price: zone.price,
+            strength: zone.strength === 'strong' ? 0.9 : zone.strength === 'medium' ? 0.6 : 0.3,
+            touches: zone.touchCount,
+            distance: formatDistancePercent(zone.price, effectiveCurrentPrice),
+          })),
+          distances: {
+            nearestSupport: analysis.nextSupport ? formatDistancePercent(analysis.nextSupport, effectiveCurrentPrice) : 'N/A',
+            nearestResistance: analysis.nextResistance ? formatDistancePercent(analysis.nextResistance, effectiveCurrentPrice) : 'N/A',
+          },
+          trend: analysis.trend || 'neutral',
+          recommendation: analysis.trend === 'bullish' ? 'Buy on support' : analysis.trend === 'bearish' ? 'Sell on resistance' : 'Trade range',
+        };
+
         return {
           content: [
             {
@@ -280,6 +342,7 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
               text: formatPriceLevelAnalysisResponse(analysis, effectiveCurrentPrice, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -578,6 +641,7 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
       title: 'Quick Support & Resistance',
       description: 'Get just the nearest support and resistance levels with minimal overhead. Uses the streamlined getSupportResistanceLevels function. For full zone analysis with caching, use get_support_resistance instead.',
       inputSchema: QuickSRInputSchema,
+      outputSchema: SupportResistanceOutputSchema as any,
     },
     async ({ symbol, timeframe }) => {
       const effectiveTimeframe = timeframe || '1d';
@@ -608,8 +672,23 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
           };
         }
 
-        // Use the simpler getSupportResistanceLevels function directly
-        const result = await getSupportResistanceLevels(symbol.toUpperCase().trim(), effectiveTimeframe);
+        // Use calculateLiquidityZones to get strength data for schema compliance
+        const analysis = await calculateLiquidityZones(symbol.toUpperCase().trim(), effectiveTimeframe);
+
+        const result = {
+          symbol: analysis.symbol,
+          currentPrice: analysis.currentPrice,
+          support: analysis.nextSupport || 0,
+          resistance: analysis.nextResistance || 0,
+          trend: analysis.trend,
+        };
+
+        // Find strength for nearest levels
+        const supportZone = analysis.liquidityZones.find(z => z.type === 'support' && Math.abs(z.price - (analysis.nextSupport || 0)) < 0.001);
+        const resistanceZone = analysis.liquidityZones.find(z => z.type === 'resistance' && Math.abs(z.price - (analysis.nextResistance || 0)) < 0.001);
+
+        const supportStrengthVal = supportZone ? (supportZone.strength === 'strong' ? 0.9 : supportZone.strength === 'medium' ? 0.6 : 0.3) : 0.5;
+        const resistanceStrengthVal = resistanceZone ? (resistanceZone.strength === 'strong' ? 0.9 : resistanceZone.strength === 'medium' ? 0.6 : 0.3) : 0.5;
 
         // Format compact response
         const lines = [
@@ -626,8 +705,18 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
           `Trend: ${getTrendEmoji(result.trend)} ${result.trend}`,
         ];
 
+        const structuredData = {
+          symbol: analysis.symbol,
+          currentPrice: analysis.currentPrice,
+          nearestSupport: analysis.nextSupport || 0,
+          nearestResistance: analysis.nextResistance || 0,
+          supportStrength: supportStrengthVal,
+          resistanceStrength: resistanceStrengthVal,
+        };
+
         return {
           content: [{ type: 'text', text: lines.join('\n') }],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -661,6 +750,7 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
       title: 'Get Available Timeframes',
       description: 'Get the list of available timeframes for liquidity zone analysis.',
       inputSchema: z.object({}),
+      outputSchema: AvailableTimeframesOutputSchema as any,
     },
     async () => {
       const timeframes = getAvailableTimeframes();
@@ -680,8 +770,14 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
         'Tip: Use these timeframes with get_liquidity_zones, get_support_resistance, or quick_support_resistance tools.',
       ];
 
+      const structuredData = {
+        timeframes: timeframes,
+        descriptions: descriptions,
+      };
+
       return {
         content: [{ type: 'text', text: lines.join('\n') }],
+        structuredContent: structuredData,
       };
     }
   );

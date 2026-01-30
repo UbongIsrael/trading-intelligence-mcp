@@ -32,6 +32,7 @@ build/
 coverage/
 testing_artifacts/
 opus_docs/
+deployment/
 *.test.js.map
 
 # Logs

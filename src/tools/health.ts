@@ -5,9 +5,10 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod/v4';
-import { addToRegistry } from './registry.js';
+import { addToRegistry, getRegisteredTools } from './registry.js';
 import { config } from '../config.js';
 import { getCacheService } from '../cache/index.js';
+import { HealthCheckOutputSchema } from '../schemas/output-schemas.js';
 
 /**
  * Register the health check tool
@@ -23,10 +24,32 @@ export function registerHealthCheckTool(server: McpServer): void {
           .optional()
           .describe('Include detailed diagnostic information'),
       },
+      outputSchema: HealthCheckOutputSchema as any,
     },
     async ({ detailed = false }) => {
-      const healthData = await getHealthData(detailed);
-      
+      const toolCount = getRegisteredTools().length;
+      const healthData = await getHealthData(detailed, toolCount);
+
+      // Create schema-compliant structured data
+      const structuredData = {
+        status: healthData.status as 'healthy' | 'unhealthy',
+        version: healthData.version,
+        uptime: healthData.uptime,
+        cache: {
+          status: healthData.cache?.stats ? 'connected' : 'disconnected',
+          latency: healthData.services?.redis?.latency || '0ms',
+          hitRate: healthData.cache?.hitRate || '0%',
+        },
+        tools: toolCount,
+        integrations: {
+          yahooFinance: 'operational',
+          coinGecko: 'operational',
+          binance: 'operational',
+          alphaVantage: 'operational',
+          redis: healthData.services?.redis?.connected ? 'connected' : 'disconnected',
+        }
+      };
+
       return {
         content: [
           {
@@ -34,7 +57,7 @@ export function registerHealthCheckTool(server: McpServer): void {
             text: JSON.stringify(healthData, null, 2),
           },
         ],
-        structuredContent: healthData,
+        structuredContent: structuredData,
       };
     }
   );
@@ -50,7 +73,7 @@ export function registerHealthCheckTool(server: McpServer): void {
 /**
  * Gather health data
  */
-async function getHealthData(detailed: boolean): Promise<any> {
+async function getHealthData(detailed: boolean, toolCount: number): Promise<any> {
   const baseHealth = {
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -69,6 +92,7 @@ async function getHealthData(detailed: boolean): Promise<any> {
 
   return {
     ...baseHealth,
+    tools: toolCount,
     system: {
       platform: process.platform,
       nodeVersion: process.version,

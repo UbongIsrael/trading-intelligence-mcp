@@ -16,6 +16,12 @@ import {
   getSupportedPerpetualSymbols,
   FundingRateStats,
 } from '../services/funding.js';
+import {
+  FundingRateOutputSchema,
+  BatchPricesOutputSchema,
+  FundingRateStatsOutputSchema,
+  ListSupportedPerpetualsOutputSchema
+} from '../schemas/output-schemas.js';
 
 /**
  * Input schema for funding rate tool
@@ -60,6 +66,7 @@ export function registerFundingRateTool(server: McpServer): void {
       title: 'Get Perpetual Funding Rate',
       description: 'Get current funding rate for crypto perpetual futures. Funding rates indicate long/short sentiment. Positive rates mean longs pay shorts (bullish), negative means shorts pay longs (bearish). Data cached for 15 minutes.',
       inputSchema: FundingRateInputSchema,
+      outputSchema: FundingRateOutputSchema as any,
     },
     async ({ symbol }) => {
       const startTime = Date.now();
@@ -77,6 +84,20 @@ export function registerFundingRateTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Funding Tool] Fetched ${symbol} in ${responseTime}ms (cached: ${result.cached})`);
 
+        const ratePercent = (result.data.rate * 100).toFixed(4);
+        const annualized = (result.data.rate * 3 * 365 * 100).toFixed(2);
+
+        const structuredData = {
+          symbol: result.data.symbol,
+          fundingRate: result.data.rate,
+          fundingRatePercent: ratePercent,
+          nextFundingTime: result.data.nextFundingTime?.toISOString() || '',
+          interpretation: result.data.rate > 0 ? 'Bullish' : result.data.rate < 0 ? 'Bearish' : 'Neutral',
+          annualizedRate: annualized,
+          source: result.data.exchange,
+          cached: result.cached,
+        };
+
         return {
           content: [
             {
@@ -84,6 +105,7 @@ export function registerFundingRateTool(server: McpServer): void {
               text: formatFundingRateResponse(result.data, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -117,6 +139,7 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
       title: 'Get Multiple Funding Rates',
       description: 'Get current funding rates for multiple perpetual futures at once. Maximum 50 symbols. Data cached for 15 minutes.',
       inputSchema: BatchFundingRateInputSchema,
+      outputSchema: BatchPricesOutputSchema as any,
     },
     async ({ symbols }) => {
       const startTime = Date.now();
@@ -157,6 +180,23 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Batch Funding Tool] Fetched ${successCount}/${symbols.length} rates in ${responseTime}ms (cached: ${cachedCount})`);
 
+        const structuredRates = Array.from(results.values()).map(result => ({
+          symbol: result.data.symbol,
+          price: result.data.rate, // Mapping funding rate to price field for reusable schema
+          change: 0,
+          changePercent: 0,
+          volume: 0,
+          marketCap: 0,
+          timestamp: new Date().toISOString(),
+          source: result.data.exchange,
+          cached: result.cached,
+        }));
+
+        const structuredData = {
+          prices: structuredRates,
+          timestamp: new Date().toISOString(),
+        };
+
         return {
           content: [
             {
@@ -164,6 +204,7 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
               text: formatBatchFundingRatesResponse(fundingRatesData, successCount, failedCount, cachedCount),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -197,6 +238,7 @@ export function registerAllFundingRatesTool(server: McpServer): void {
       title: 'Get All Funding Rates',
       description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
       inputSchema: z.object({}),
+      outputSchema: BatchPricesOutputSchema as any,
     },
     async () => {
       const startTime = Date.now();
@@ -214,13 +256,32 @@ export function registerAllFundingRatesTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[All Funding Tool] Fetched all rates in ${responseTime}ms (cached: ${result.cached})`);
 
+        const rates = result.data as FundingRate[];
+        const structuredRates = rates.map(rate => ({
+          symbol: rate.symbol,
+          price: rate.rate, // Mapping funding rate to price for reusable schema
+          change: 0,
+          changePercent: 0,
+          volume: 0,
+          marketCap: 0,
+          timestamp: new Date().toISOString(),
+          source: rate.exchange,
+          cached: result.cached,
+        }));
+
+        const structuredData = {
+          prices: structuredRates,
+          timestamp: new Date().toISOString(),
+        };
+
         return {
           content: [
             {
               type: 'text',
-              text: formatAllFundingRatesResponse(result.data as FundingRate[], result.cached),
+              text: formatAllFundingRatesResponse(rates, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -254,6 +315,7 @@ export function registerFundingRateStatsTool(server: McpServer): void {
       title: 'Get Funding Rate Statistics',
       description: 'Get statistical analysis of historical funding rates including average, high, low, and trends. Useful for understanding funding rate behavior over time.',
       inputSchema: FundingRateStatsInputSchema,
+      outputSchema: FundingRateStatsOutputSchema as any,
     },
     async ({ symbol, limit }) => {
       const startTime = Date.now();
@@ -264,6 +326,16 @@ export function registerFundingRateStatsTool(server: McpServer): void {
         const responseTime = Date.now() - startTime;
         console.log(`[Funding Stats Tool] Calculated stats for ${symbol} in ${responseTime}ms`);
 
+        const structuredData = {
+          symbol: symbol,
+          current: stats.current,
+          average: stats.average,
+          high: stats.high,
+          low: stats.low,
+          trend: stats.current > stats.average ? 'up' : stats.current < stats.average ? 'down' : 'stable',
+          dataPoints: stats.count,
+        };
+
         return {
           content: [
             {
@@ -271,6 +343,7 @@ export function registerFundingRateStatsTool(server: McpServer): void {
               text: formatFundingRateStatsResponse(stats),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -304,9 +377,16 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
       title: 'List Supported Perpetuals',
       description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
       inputSchema: z.object({}),
+      outputSchema: ListSupportedPerpetualsOutputSchema as any,
     },
     async () => {
       const symbols = getSupportedPerpetualSymbols();
+
+      const structuredData = {
+        symbols: symbols,
+        count: symbols.length,
+        source: 'binance',
+      };
 
       return {
         content: [
@@ -315,6 +395,7 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
             text: formatSupportedSymbolsResponse(symbols),
           },
         ],
+        structuredContent: structuredData,
       };
     }
   );

@@ -17,6 +17,12 @@ import {
   FinancialStatement,
   ExtendedEarningsData,
 } from '../services/fundamentals-alphavantage.js';
+import {
+  CompanyOverviewOutputSchema,
+  EarningsOutputSchema,
+  FinancialStatementsOutputSchema,
+  FullFundamentalsOutputSchema
+} from '../schemas/output-schemas.js';
 
 /**
  * Input schema for company overview tool
@@ -81,6 +87,7 @@ export function registerCompanyOverviewTool(server: McpServer): void {
       title: 'Get Company Overview',
       description: 'Get company profile and key financial metrics for a stock. Includes sector, market cap, P/E ratio, EPS, 52-week range, and more. Data cached for 1 hour.',
       inputSchema: CompanyOverviewInputSchema,
+      outputSchema: CompanyOverviewOutputSchema as any,
     },
     async ({ symbol }) => {
       const startTime = Date.now();
@@ -127,6 +134,23 @@ export function registerCompanyOverviewTool(server: McpServer): void {
         // Extract full data if available, otherwise use the basic data
         const overview = (result.data as any)._fullData || result.data;
 
+        const structuredData = {
+          symbol: overview.symbol,
+          name: overview.name || overview.companyName || '',
+          description: overview.description || '',
+          sector: overview.sector || '',
+          industry: overview.industry || '',
+          marketCap: overview.marketCap || 0,
+          peRatio: overview.peRatio || 0,
+          eps: overview.eps || 0,
+          dividendYield: overview.dividendYield || 0,
+          "52WeekHigh": overview.week52High || 0,
+          "52WeekLow": overview.week52Low || 0,
+          source: 'alpha_vantage',
+          cached: result.cached,
+          cacheExpiry: '', // Optional in schema
+        };
+
         return {
           content: [
             {
@@ -134,6 +158,7 @@ export function registerCompanyOverviewTool(server: McpServer): void {
               text: formatCompanyOverviewResponse(overview, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -167,6 +192,7 @@ export function registerEarningsTool(server: McpServer): void {
       title: 'Get Earnings Data',
       description: 'Get quarterly earnings data including EPS estimates, actuals, and surprise percentages. Shows analyst expectations vs actual performance. Data cached for 1 hour.',
       inputSchema: EarningsInputSchema,
+      outputSchema: EarningsOutputSchema as any,
     },
     async ({ symbol, limit }) => {
       const startTime = Date.now();
@@ -205,6 +231,19 @@ export function registerEarningsTool(server: McpServer): void {
 
         const earnings = (result.data as any)._earningsData || [];
 
+        const structuredData = {
+          symbol: symbol.toUpperCase(),
+          earnings: earnings.map((e: any) => ({
+            fiscalDateEnding: e.period || '',
+            reportedEPS: e.epsActual || 0,
+            estimatedEPS: e.epsEstimate || 0,
+            surprise: e.surprise || 0,
+            surprisePercentage: e.surprisePercent || 0,
+          })),
+          source: 'alpha_vantage',
+          cached: result.cached,
+        };
+
         return {
           content: [
             {
@@ -212,6 +251,7 @@ export function registerEarningsTool(server: McpServer): void {
               text: formatEarningsResponse(symbol.toUpperCase(), earnings, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -245,6 +285,7 @@ export function registerFinancialStatementsTool(server: McpServer): void {
       title: 'Get Financial Statements',
       description: 'Get company financial statements including balance sheet, income statement, and cash flow data. Available for annual or quarterly periods. Data cached for 1 hour.',
       inputSchema: FinancialStatementsInputSchema,
+      outputSchema: FinancialStatementsOutputSchema as any,
     },
     async ({ symbol, period, limit }) => {
       const startTime = Date.now();
@@ -283,6 +324,34 @@ export function registerFinancialStatementsTool(server: McpServer): void {
         console.log(`[Financial Statements Tool] Fetched ${symbol} in ${responseTime}ms (cached: ${result.cached})`);
 
         const statements = (result.data as any)._statementsData || [];
+        const latestInfo = statements.length > 0 ? statements[0] : {};
+
+        const structuredData = {
+          symbol: symbol.toUpperCase(),
+          period: effectivePeriod,
+          incomeStatement: {
+            revenue: latestInfo.revenue,
+            grossProfit: latestInfo.grossProfit,
+            operatingIncome: latestInfo.operatingIncome,
+            netIncome: latestInfo.netIncome,
+            ebitda: latestInfo.ebitda
+          },
+          balanceSheet: {
+            totalAssets: latestInfo.totalAssets,
+            totalLiabilities: latestInfo.totalLiabilities,
+            totalEquity: latestInfo.totalEquity,
+            cash: latestInfo.cash,
+            totalDebt: latestInfo.totalDebt
+          },
+          cashFlow: {
+            operatingCashFlow: latestInfo.operatingCashFlow,
+            investingCashFlow: latestInfo.investingCashFlow,
+            financingCashFlow: latestInfo.financingCashFlow,
+            freeCashFlow: latestInfo.freeCashFlow
+          },
+          source: 'alpha_vantage',
+          cached: result.cached,
+        };
 
         return {
           content: [
@@ -291,6 +360,7 @@ export function registerFinancialStatementsTool(server: McpServer): void {
               text: formatFinancialStatementsResponse(symbol.toUpperCase(), statements, effectivePeriod, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -324,6 +394,7 @@ export function registerFullFundamentalsTool(server: McpServer): void {
       title: 'Get Full Fundamentals',
       description: 'Get comprehensive fundamental data for a stock including company overview, earnings history, and key financial ratios. Best for complete fundamental analysis. Data cached for 1 hour.',
       inputSchema: FullFundamentalsInputSchema,
+      outputSchema: FullFundamentalsOutputSchema as any,
     },
     async ({ symbol }) => {
       const startTime = Date.now();
@@ -360,6 +431,52 @@ export function registerFullFundamentalsTool(server: McpServer): void {
         console.log(`[Full Fundamentals Tool] Fetched ${symbol} in ${responseTime}ms (cached: ${result.cached})`);
 
         const fullData = (result.data as any)._fullFundamentals;
+        const ov = fullData.overview;
+
+        const structuredOverview = {
+          symbol: ov.symbol,
+          name: ov.name,
+          description: ov.description || '',
+          sector: ov.sector || '',
+          industry: ov.industry || '',
+          marketCap: ov.marketCap || 0,
+          peRatio: ov.peRatio || 0,
+          eps: ov.eps || 0,
+          dividendYield: ov.dividendYield || 0,
+          "52WeekHigh": ov.week52High || 0,
+          "52WeekLow": ov.week52Low || 0,
+          source: 'alpha_vantage',
+          cached: result.cached,
+          cacheExpiry: '',
+        };
+
+        const structuredEarnings = {
+          symbol: symbol.toUpperCase(),
+          earnings: fullData.earnings.map((e: any) => ({
+            fiscalDateEnding: e.period || '',
+            reportedEPS: e.epsActual || 0,
+            estimatedEPS: e.epsEstimate || 0,
+            surprise: e.surprise || 0,
+            surprisePercentage: e.surprisePercent || 0,
+          })),
+          source: 'alpha_vantage',
+          cached: result.cached,
+        };
+
+        // Generate AI summary string
+        const m = fullData.metrics;
+        const summary = `Financial Summary for ${ov.name}: Market Cap $${formatLargeNumber(ov.marketCap)}. ` +
+          `PE Ratio: ${ov.peRatio?.toFixed(2) || 'N/A'}, EPS: ${ov.eps?.toFixed(2) || 'N/A'}. ` +
+          `Profitability: Gross Margin ${m.profitability?.grossMargin?.toFixed(1) || 'N/A'}%, ` +
+          `Net Margin ${m.profitability?.netMargin?.toFixed(1) || 'N/A'}%.`;
+
+        const structuredData = {
+          symbol: symbol.toUpperCase(),
+          overview: structuredOverview,
+          earnings: structuredEarnings,
+          summary: summary,
+          source: 'alpha_vantage',
+        };
 
         return {
           content: [
@@ -368,6 +485,7 @@ export function registerFullFundamentalsTool(server: McpServer): void {
               text: formatFullFundamentalsResponse(fullData, result.cached),
             },
           ],
+          structuredContent: structuredData,
         };
 
       } catch (error: any) {
@@ -411,7 +529,7 @@ function formatCompanyOverviewResponse(overview: CompanyOverview | any, cached: 
 
   lines.push('');
   lines.push('💰 Key Metrics:');
-  
+
   if (overview.marketCap) {
     lines.push(`  Market Cap: $${formatLargeNumber(overview.marketCap)}`);
   }
@@ -476,10 +594,10 @@ function formatEarningsResponse(symbol: string, earnings: ExtendedEarningsData[]
 
   for (const e of earnings) {
     const emoji = (e.surprisePercent || 0) > 0 ? '✅' : (e.surprisePercent || 0) < 0 ? '❌' : '➖';
-    const surpriseStr = e.surprisePercent !== undefined 
-      ? `${e.surprisePercent >= 0 ? '+' : ''}${e.surprisePercent.toFixed(2)}%` 
+    const surpriseStr = e.surprisePercent !== undefined
+      ? `${e.surprisePercent >= 0 ? '+' : ''}${e.surprisePercent.toFixed(2)}%`
       : 'N/A';
-    
+
     lines.push(`  ${emoji} ${e.quarter} ${e.year}:`);
     lines.push(`     EPS: $${e.epsActual?.toFixed(2) || 'N/A'} (Est: $${e.epsEstimate?.toFixed(2) || 'N/A'})`);
     lines.push(`     Surprise: ${surpriseStr}`);
@@ -495,8 +613,8 @@ function formatEarningsResponse(symbol: string, earnings: ExtendedEarningsData[]
  * Format financial statements response
  */
 function formatFinancialStatementsResponse(
-  symbol: string, 
-  statements: FinancialStatement[], 
+  symbol: string,
+  statements: FinancialStatement[],
   period: string,
   cached: boolean
 ): string {
@@ -512,12 +630,12 @@ function formatFinancialStatementsResponse(
   }
 
   for (const stmt of statements) {
-    const periodLabel = stmt.fiscalQuarter 
-      ? `Q${stmt.fiscalQuarter} ${stmt.fiscalYear}` 
+    const periodLabel = stmt.fiscalQuarter
+      ? `Q${stmt.fiscalQuarter} ${stmt.fiscalYear}`
       : `FY ${stmt.fiscalYear}`;
-    
+
     lines.push(`📅 ${periodLabel}`);
-    
+
     // Income Statement
     if (stmt.revenue || stmt.netIncome) {
       lines.push('  Income Statement:');
@@ -526,7 +644,7 @@ function formatFinancialStatementsResponse(
       if (stmt.operatingIncome) lines.push(`    Operating Income: $${formatLargeNumber(stmt.operatingIncome)}`);
       if (stmt.netIncome) lines.push(`    Net Income: $${formatLargeNumber(stmt.netIncome)}`);
     }
-    
+
     // Margins
     if (stmt.grossMargin || stmt.netMargin) {
       lines.push('  Margins:');
@@ -534,7 +652,7 @@ function formatFinancialStatementsResponse(
       if (stmt.operatingMargin) lines.push(`    Operating Margin: ${stmt.operatingMargin.toFixed(1)}%`);
       if (stmt.netMargin) lines.push(`    Net Margin: ${stmt.netMargin.toFixed(1)}%`);
     }
-    
+
     // Balance Sheet
     if (stmt.totalAssets || stmt.totalLiabilities) {
       lines.push('  Balance Sheet:');
@@ -543,7 +661,7 @@ function formatFinancialStatementsResponse(
       if (stmt.totalEquity) lines.push(`    Shareholders Equity: $${formatLargeNumber(stmt.totalEquity)}`);
       if (stmt.cash) lines.push(`    Cash: $${formatLargeNumber(stmt.cash)}`);
     }
-    
+
     // Cash Flow
     if (stmt.operatingCashFlow || stmt.freeCashFlow) {
       lines.push('  Cash Flow:');
@@ -552,7 +670,7 @@ function formatFinancialStatementsResponse(
       if (stmt.financingCashFlow) lines.push(`    Financing: $${formatLargeNumber(stmt.financingCashFlow)}`);
       if (stmt.freeCashFlow) lines.push(`    Free Cash Flow: $${formatLargeNumber(stmt.freeCashFlow)}`);
     }
-    
+
     lines.push('');
   }
 
@@ -566,7 +684,7 @@ function formatFinancialStatementsResponse(
  */
 function formatFullFundamentalsResponse(data: any, cached: boolean): string {
   const { overview, earnings, metrics } = data;
-  
+
   const lines: string[] = [
     `🏢 ${overview.name} (${overview.symbol}) - Full Fundamental Analysis`,
     '',
@@ -619,7 +737,7 @@ function formatFullFundamentalsResponse(data: any, cached: boolean): string {
     const recentEarnings = earnings.slice(0, 4);
     const beats = recentEarnings.filter((e: any) => (e.surprisePercent || 0) > 0).length;
     lines.push(`  Last 4 quarters: ${beats}/4 beats`);
-    
+
     for (const e of recentEarnings) {
       const emoji = (e.surprisePercent || 0) > 0 ? '✅' : (e.surprisePercent || 0) < 0 ? '❌' : '➖';
       lines.push(`  ${emoji} ${e.quarter} ${e.year}: $${e.epsActual?.toFixed(2) || 'N/A'} (${e.surprisePercent >= 0 ? '+' : ''}${e.surprisePercent?.toFixed(1) || 'N/A'}%)`);
