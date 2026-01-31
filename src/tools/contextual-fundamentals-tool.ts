@@ -55,7 +55,7 @@ export function registerContextualFundamentalsTool(server: McpServer): void {
         {
             title: 'Get Contextual Fundamental Analysis',
             description: 'Get company fundamentals with YoY changes, pattern detection, and contextual insights. Saves 30+ minutes of manual analysis by flagging unusual patterns and generating actionable insights.',
-            inputSchema: ContextualFundamentalsInputSchema,
+            inputSchema: ContextualFundamentalsInputSchema as any,
             outputSchema: ContextualFundamentalsOutputSchema as any,
         },
         async ({ symbol, includeInsider = true, includeEvents = true }) => {

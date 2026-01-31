@@ -44,7 +44,7 @@ export function registerPriceTool(server: McpServer): void {
     {
       title: 'Get Asset Price',
       description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
-      inputSchema: PriceInputSchema,
+      inputSchema: PriceInputSchema as any, // Context Protocol requirement
       outputSchema: PriceOutputSchema as any, // Context Protocol requirement
     },
     async ({ symbol, assetType }) => {

@@ -78,7 +78,7 @@ export function registerLiquidityZonesTool(server: McpServer): void {
     {
       title: 'Get Liquidity Zones',
       description: 'Identify key support and resistance levels (liquidity zones) for any trading symbol. Returns the top 5 most significant price levels based on historical pivot points, with strength ratings and touch counts. Data cached for 30 minutes.',
-      inputSchema: LiquidityZonesInputSchema,
+      inputSchema: LiquidityZonesInputSchema as any,
       outputSchema: LiquidityZoneOutputSchema as any,
     },
     async ({ symbol, timeframe, lookbackDays }) => {
@@ -177,7 +177,7 @@ export function registerSupportResistanceTool(server: McpServer): void {
     {
       title: 'Get Support & Resistance',
       description: 'Get the nearest support and resistance levels for a trading symbol. Returns just the key levels closest to current price - perfect for quick trading decisions. Data cached for 30 minutes.',
-      inputSchema: SupportResistanceInputSchema,
+      inputSchema: SupportResistanceInputSchema as any,
       outputSchema: SupportResistanceOutputSchema as any,
     },
     async ({ symbol, timeframe }) => {
@@ -273,7 +273,7 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
     {
       title: 'Analyze Price Levels',
       description: 'Get comprehensive price level analysis including all support/resistance zones, distances from current price, trend direction, and trading recommendations. Ideal for detailed technical analysis. Data cached for 30 minutes.',
-      inputSchema: PriceLevelAnalysisInputSchema,
+      inputSchema: PriceLevelAnalysisInputSchema as any,
       outputSchema: PriceLevelAnalysisOutputSchema as any,
     },
     async ({ symbol, currentPrice, timeframe }) => {
@@ -640,7 +640,7 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
     {
       title: 'Quick Support & Resistance',
       description: 'Get just the nearest support and resistance levels with minimal overhead. Uses the streamlined getSupportResistanceLevels function. For full zone analysis with caching, use get_support_resistance instead.',
-      inputSchema: QuickSRInputSchema,
+      inputSchema: QuickSRInputSchema as any,
       outputSchema: SupportResistanceOutputSchema as any,
     },
     async ({ symbol, timeframe }) => {
