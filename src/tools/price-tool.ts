@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
+import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { getPrice, getMultiplePrices, invalidatePrice } from '../services/prices.js';
 import { PriceData } from '../types.js';

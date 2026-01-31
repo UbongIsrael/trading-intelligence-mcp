@@ -194,6 +194,8 @@ interface AlphaVantageCashFlow {
     }>;
 }
 
+import { Mutex } from '../utils/mutex.js';
+
 /**
  * Rate limiting and quota management
  */
@@ -201,6 +203,9 @@ const RATE_LIMIT_DELAY = 12000; // 12 seconds = 5 requests/minute (free tier lim
 const REQUEST_TIMEOUT = 10000;  // 10 seconds timeout
 const DAILY_LIMIT = 25;         // Free tier daily limit
 const DAILY_LIMIT_WARNING = 20; // Warn when approaching limit
+
+// Mutex to enforce sequential requests
+const requestMutex = new Mutex();
 
 let dailyRequestCount = 0;
 let lastResetDate = new Date().toDateString();
@@ -296,111 +301,114 @@ async function makeAPICall<T>(
     symbol: string,
     additionalParams: Record<string, string> = {}
 ): Promise<T> {
-    // Check and reset counter if new day
-    checkAndResetCounter();
+    // Use mutex to ensure sequential execution and strict rate limiting
+    return await requestMutex.dispatch(async () => {
+        // Check and reset counter if new day
+        checkAndResetCounter();
 
-    // Warn if approaching limit
-    if (dailyRequestCount >= DAILY_LIMIT_WARNING) {
-        console.warn(`⚠️ [Alpha Vantage] ${dailyRequestCount}/${DAILY_LIMIT} daily requests used`);
-    }
+        // Warn if approaching limit
+        if (dailyRequestCount >= DAILY_LIMIT_WARNING) {
+            console.warn(`⚠️ [Alpha Vantage] ${dailyRequestCount}/${DAILY_LIMIT} daily requests used`);
+        }
 
-    // Check if daily limit reached
-    if (dailyRequestCount >= DAILY_LIMIT) {
-        throw new APIError(
-            `Alpha Vantage daily limit reached (${dailyRequestCount}/${DAILY_LIMIT}). Data will refresh tomorrow or upgrade to Premium tier.`,
-            {
-                code: 'DAILY_LIMIT_REACHED',
-                limit: DAILY_LIMIT,
-                current: dailyRequestCount,
-                upgradeUrl: 'https://www.alphavantage.co/premium/',
-                resetTime: new Date(new Date().setHours(24, 0, 0, 0))
+        // Check if daily limit reached
+        if (dailyRequestCount >= DAILY_LIMIT) {
+            throw new APIError(
+                `Alpha Vantage daily limit reached (${dailyRequestCount}/${DAILY_LIMIT}). Data will refresh tomorrow or upgrade to Premium tier.`,
+                {
+                    code: 'DAILY_LIMIT_REACHED',
+                    limit: DAILY_LIMIT,
+                    current: dailyRequestCount,
+                    upgradeUrl: 'https://www.alphavantage.co/premium/',
+                    resetTime: new Date(new Date().setHours(24, 0, 0, 0))
+                }
+            );
+        }
+
+        // Apply rate limiting
+        await respectRateLimit();
+
+        const apiKey = getApiKey();
+        const url = new URL(apiConfig.alphaVantage.baseUrl);
+        url.searchParams.append('function', functionName);
+        url.searchParams.append('symbol', symbol);
+        url.searchParams.append('apikey', apiKey);
+
+        for (const [key, value] of Object.entries(additionalParams)) {
+            url.searchParams.append(key, value);
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+        try {
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                },
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new APIError(
+                    `Alpha Vantage API error: ${response.status} ${response.statusText}`,
+                    { status: response.status, function: functionName }
+                );
             }
-        );
-    }
 
-    // Apply rate limiting
-    await respectRateLimit();
+            const data = await response.json() as Record<string, unknown>;
 
-    const apiKey = getApiKey();
-    const url = new URL(apiConfig.alphaVantage.baseUrl);
-    url.searchParams.append('function', functionName);
-    url.searchParams.append('symbol', symbol);
-    url.searchParams.append('apikey', apiKey);
+            // Check for Alpha Vantage error responses
+            if (data['Error Message']) {
+                throw new APIError(
+                    `Alpha Vantage API error: ${data['Error Message']}`,
+                    { code: 'ALPHA_VANTAGE_ERROR', response: data }
+                );
+            }
 
-    for (const [key, value] of Object.entries(additionalParams)) {
-        url.searchParams.append(key, value);
-    }
+            // Check for rate limit note
+            if (typeof data['Note'] === 'string' && data['Note'].includes('5 calls per minute')) {
+                throw new APIError(
+                    'Alpha Vantage rate limit hit (5/min). Please wait 12 seconds.',
+                    { code: 'RATE_LIMIT_HIT', retryAfter: 12000 }
+                );
+            }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+            // Check for information message (often means invalid symbol or no data)
+            if (data['Information']) {
+                throw new APIError(
+                    `Alpha Vantage: ${data['Information']}`,
+                    { code: 'NO_DATA', response: data }
+                );
+            }
 
-    try {
-        const response = await fetch(url.toString(), {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json',
-            },
-            signal: controller.signal,
-        });
+            // Increment counter AFTER successful call
+            dailyRequestCount++;
+            console.log(`📊 [Alpha Vantage] Request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
 
-        clearTimeout(timeoutId);
+            return data as T;
 
-        if (!response.ok) {
+        } catch (error: any) {
+            if (error.name === 'AbortError') {
+                throw new APIError(
+                    `Request timeout for Alpha Vantage ${functionName}`,
+                    { function: functionName, timeout: REQUEST_TIMEOUT }
+                );
+            }
+
+            if (error instanceof APIError) {
+                throw error;
+            }
+
             throw new APIError(
-                `Alpha Vantage API error: ${response.status} ${response.statusText}`,
-                { status: response.status, function: functionName }
+                `Alpha Vantage request failed: ${error.message}`,
+                { function: functionName, originalError: error.message }
             );
         }
-
-        const data = await response.json() as Record<string, unknown>;
-
-        // Check for Alpha Vantage error responses
-        if (data['Error Message']) {
-            throw new APIError(
-                `Alpha Vantage API error: ${data['Error Message']}`,
-                { code: 'ALPHA_VANTAGE_ERROR', response: data }
-            );
-        }
-
-        // Check for rate limit note
-        if (typeof data['Note'] === 'string' && data['Note'].includes('5 calls per minute')) {
-            throw new APIError(
-                'Alpha Vantage rate limit hit (5/min). Please wait 12 seconds.',
-                { code: 'RATE_LIMIT_HIT', retryAfter: 12000 }
-            );
-        }
-
-        // Check for information message (often means invalid symbol or no data)
-        if (data['Information']) {
-            throw new APIError(
-                `Alpha Vantage: ${data['Information']}`,
-                { code: 'NO_DATA', response: data }
-            );
-        }
-
-        // Increment counter AFTER successful call
-        dailyRequestCount++;
-        console.log(`📊 [Alpha Vantage] Request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
-
-        return data as T;
-
-    } catch (error: any) {
-        if (error.name === 'AbortError') {
-            throw new APIError(
-                `Request timeout for Alpha Vantage ${functionName}`,
-                { function: functionName, timeout: REQUEST_TIMEOUT }
-            );
-        }
-
-        if (error instanceof APIError) {
-            throw error;
-        }
-
-        throw new APIError(
-            `Alpha Vantage request failed: ${error.message}`,
-            { function: functionName, originalError: error.message }
-        );
-    }
+    });
 }
 
 /**

@@ -85,6 +85,11 @@ export async function getPrice(query: PriceQuery): Promise<{
         error.message
       );
 
+      // Hydrate timestamp if it's a string (Redis serialization)
+      if (cachedData.timestamp && typeof cachedData.timestamp === 'string') {
+        cachedData.timestamp = new Date(cachedData.timestamp);
+      }
+
       return {
         data: cachedData,
         cached: true,

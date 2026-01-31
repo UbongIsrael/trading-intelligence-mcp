@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
+import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { TechnicalAnalysis } from '../types.js';
 import { getCacheService } from '../cache/index.js';
