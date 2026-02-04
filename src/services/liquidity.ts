@@ -499,6 +499,9 @@ function determineTrend(priceData: PriceBar[]): 'bullish' | 'bearish' | 'neutral
 /**
  * Identify pivot points and convert to liquidity zones
  */
+/**
+ * Identify pivot points and convert to liquidity zones
+ */
 export function identifyPivotPoints(
   priceData: PriceBar[],
   currentPrice: number,
@@ -512,32 +515,36 @@ export function identifyPivotPoints(
   const highs = findLocalHighs(priceData, windowSize);
   const lows = findLocalLows(priceData, windowSize);
 
+  // Combine all raw levels before clustering
+  // Note: We treat them all as "significant price levels" first
+  const allLevels = [...highs, ...lows];
+
   // Cluster nearby levels
-  const clusteredResistance = clusterLevels(highs, clusterThreshold);
-  const clusteredSupport = clusterLevels(lows, clusterThreshold);
+  // We cluster everything together because a previous High often becomes a future Low (SR Flip)
+  const clusteredLevels = clusterLevels(allLevels, clusterThreshold);
 
-  // Convert to LiquidityZone format
-  const resistanceZones: LiquidityZone[] = clusteredResistance.map(level => ({
-    price: Math.round(level.avgPrice * 100) / 100, // Round to 2 decimal places
-    type: 'resistance',
-    strength: calculateStrength(level.touches, level.avgVolume, avgVolume),
-    touchCount: level.touches,
-    lastTouched: level.lastDate,
-  }));
+  // Convert to LiquidityZone format and classify relative to CURRENT PRICE
+  const zones: LiquidityZone[] = clusteredLevels.map(level => {
+    const avgPrice = Math.round(level.avgPrice * 100) / 100;
 
-  const supportZones: LiquidityZone[] = clusteredSupport.map(level => ({
-    price: Math.round(level.avgPrice * 100) / 100, // Round to 2 decimal places
-    type: 'support',
-    strength: calculateStrength(level.touches, level.avgVolume, avgVolume),
-    touchCount: level.touches,
-    lastTouched: level.lastDate,
-  }));
+    // Dynamic Role:
+    // If Zone is ABOVE current price -> Resistance
+    // If Zone is BELOW current price -> Support
+    const type = avgPrice > currentPrice ? 'resistance' : 'support';
 
-  // Combine and sort by importance
-  const allZones = [...resistanceZones, ...supportZones];
-  allZones.sort((a, b) => scoreZone(b, currentPrice) - scoreZone(a, currentPrice));
+    return {
+      price: avgPrice,
+      type: type,
+      strength: calculateStrength(level.touches, level.avgVolume, avgVolume),
+      touchCount: level.touches,
+      lastTouched: level.lastDate,
+    };
+  });
 
-  return allZones;
+  // Sort by importance
+  zones.sort((a, b) => scoreZone(b, currentPrice) - scoreZone(a, currentPrice));
+
+  return zones;
 }
 
 /**
