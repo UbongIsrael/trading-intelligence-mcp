@@ -4,17 +4,17 @@
 export class Mutex {
     private mutex = Promise.resolve();
 
-    lock(): PromiseLike<() => void> {
+    lock(): Promise<() => void> {
         let begin: (unlock: () => void) => void = () => { };
 
         this.mutex = this.mutex.then(() => {
             return new Promise(resolve => {
-                begin = resolve;
+                begin = resolve as any;
             });
         });
 
         return new Promise(resolve => {
-            resolve(begin);
+            resolve(begin as any);
         });
     }
 

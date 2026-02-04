@@ -55,10 +55,11 @@ export function registerContextualFundamentalsTool(server: McpServer): void {
         {
             title: 'Get Contextual Fundamental Analysis',
             description: 'Get company fundamentals with YoY changes, pattern detection, and contextual insights. Saves 30+ minutes of manual analysis by flagging unusual patterns and generating actionable insights.',
-            inputSchema: ContextualFundamentalsInputSchema as any,
+            inputSchema: ContextualFundamentalsInputSchema.shape as any,
             outputSchema: ContextualFundamentalsOutputSchema as any,
         },
-        async ({ symbol, includeInsider = true, includeEvents = true }) => {
+        (async (args: { symbol: string; includeInsider?: boolean; includeEvents?: boolean }, _extra: any) => {
+            const { symbol, includeInsider = true, includeEvents = true } = args;
             const startTime = Date.now();
 
             if (!isAlphaVantageConfigured()) {
@@ -163,7 +164,7 @@ export function registerContextualFundamentalsTool(server: McpServer): void {
                     isError: true
                 };
             }
-        }
+        }) as any
     );
 
     addToRegistry({

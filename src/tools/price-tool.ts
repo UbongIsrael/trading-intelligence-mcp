@@ -44,10 +44,11 @@ export function registerPriceTool(server: McpServer): void {
     {
       title: 'Get Asset Price',
       description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
-      inputSchema: PriceInputSchema as any, // Context Protocol requirement
+      inputSchema: PriceInputSchema.shape as any, // Context Protocol requirement
       outputSchema: PriceOutputSchema as any, // Context Protocol requirement
     },
-    async ({ symbol, assetType }) => {
+    (async (args: { symbol: string; assetType?: 'stock' | 'crypto' }, _extra: any) => {
+      const { symbol, assetType } = args;
       const startTime = Date.now();
 
       try {
@@ -90,7 +91,7 @@ export function registerPriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -110,10 +111,11 @@ export function registerBatchPriceTool(server: McpServer): void {
     {
       title: 'Get Multiple Asset Prices',
       description: 'Get current price data for multiple stocks or cryptocurrencies at once. Maximum 50 symbols. Data is cached for 5 minutes.',
-      inputSchema: BatchPriceInputSchema,
+      inputSchema: BatchPriceInputSchema.shape as any,
       outputSchema: BatchPricesOutputSchema as any, // Context Protocol requirement
     },
-    async ({ symbols, assetType }) => {
+    (async (args: { symbols: string[]; assetType?: 'stock' | 'crypto' }, _extra: any) => {
+      const { symbols, assetType } = args;
       const startTime = Date.now();
 
       try {
@@ -174,7 +176,7 @@ export function registerBatchPriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -194,12 +196,11 @@ export function registerInvalidatePriceTool(server: McpServer): void {
     {
       title: 'Invalidate Price Cache',
       description: 'Clear cached price data for a specific symbol to force a fresh fetch',
-      inputSchema: z.object({
-        symbol: z.string().min(1).describe('Asset symbol to invalidate'),
-      }),
+      inputSchema: { symbol: z.string().min(1).describe('Asset symbol to invalidate') } as any,
       outputSchema: CacheInvalidationOutputSchema as any, // Context Protocol requirement
     },
-    async ({ symbol }) => {
+    (async (args: { symbol: string }, _extra: any) => {
+      const { symbol } = args;
       try {
         const invalidated = await invalidatePrice(symbol);
 
@@ -232,7 +233,7 @@ export function registerInvalidatePriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({

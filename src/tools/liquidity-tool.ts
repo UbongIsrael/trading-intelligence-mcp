@@ -78,10 +78,11 @@ export function registerLiquidityZonesTool(server: McpServer): void {
     {
       title: 'Get Liquidity Zones',
       description: 'Identify key support and resistance levels (liquidity zones) for any trading symbol. Returns the top 5 most significant price levels based on historical pivot points, with strength ratings and touch counts. Data cached for 30 minutes.',
-      inputSchema: LiquidityZonesInputSchema as any,
+      inputSchema: LiquidityZonesInputSchema.shape as any,
       outputSchema: LiquidityZoneOutputSchema as any,
     },
-    async ({ symbol, timeframe, lookbackDays }) => {
+    (async (args: { symbol: string; timeframe?: string; lookbackDays?: number }, _extra: any) => {
+      const { symbol, timeframe, lookbackDays } = args;
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -157,7 +158,7 @@ export function registerLiquidityZonesTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -177,10 +178,11 @@ export function registerSupportResistanceTool(server: McpServer): void {
     {
       title: 'Get Support & Resistance',
       description: 'Get the nearest support and resistance levels for a trading symbol. Returns just the key levels closest to current price - perfect for quick trading decisions. Data cached for 30 minutes.',
-      inputSchema: SupportResistanceInputSchema as any,
+      inputSchema: SupportResistanceInputSchema.shape as any,
       outputSchema: SupportResistanceOutputSchema as any,
     },
-    async ({ symbol, timeframe }) => {
+    (async (args: { symbol: string; timeframe?: string }, _extra: any) => {
+      const { symbol, timeframe } = args;
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -253,7 +255,7 @@ export function registerSupportResistanceTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -273,10 +275,11 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
     {
       title: 'Analyze Price Levels',
       description: 'Get comprehensive price level analysis including all support/resistance zones, distances from current price, trend direction, and trading recommendations. Ideal for detailed technical analysis. Data cached for 30 minutes.',
-      inputSchema: PriceLevelAnalysisInputSchema as any,
+      inputSchema: PriceLevelAnalysisInputSchema.shape as any,
       outputSchema: PriceLevelAnalysisOutputSchema as any,
     },
-    async ({ symbol, currentPrice, timeframe }) => {
+    (async (args: { symbol: string; currentPrice?: number; timeframe?: string }, _extra: any) => {
+      const { symbol, currentPrice, timeframe } = args;
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -355,7 +358,7 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -640,10 +643,11 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
     {
       title: 'Quick Support & Resistance',
       description: 'Get just the nearest support and resistance levels with minimal overhead. Uses the streamlined getSupportResistanceLevels function. For full zone analysis with caching, use get_support_resistance instead.',
-      inputSchema: QuickSRInputSchema as any,
+      inputSchema: QuickSRInputSchema.shape as any,
       outputSchema: SupportResistanceOutputSchema as any,
     },
-    async ({ symbol, timeframe }) => {
+    (async (args: { symbol: string; timeframe?: string }, _extra: any) => {
+      const { symbol, timeframe } = args;
       const effectiveTimeframe = timeframe || '1d';
       const validTimeframes = getAvailableTimeframes();
 
@@ -729,7 +733,7 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -749,10 +753,10 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
     {
       title: 'Get Available Timeframes',
       description: 'Get the list of available timeframes for liquidity zone analysis.',
-      inputSchema: z.object({}),
+      inputSchema: {} as any,
       outputSchema: AvailableTimeframesOutputSchema as any,
     },
-    async () => {
+    (async (_extra: any) => {
       const timeframes = getAvailableTimeframes();
 
       const descriptions: Record<string, string> = {
@@ -779,7 +783,7 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
         content: [{ type: 'text', text: lines.join('\n') }],
         structuredContent: structuredData,
       };
-    }
+    }) as any
   );
 
   addToRegistry({
