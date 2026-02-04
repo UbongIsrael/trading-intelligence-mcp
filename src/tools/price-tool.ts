@@ -3,8 +3,7 @@
  * MCP tool for fetching asset prices with Data Broker Standard compliance
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { addToRegistry } from './registry.js';
+import { registerTool } from './registry.js';
 import { getPrice, getMultiplePrices, invalidatePrice } from '../services/prices.js';
 import { PriceData } from '../types.js';
 import { PriceOutputSchema, BatchPricesOutputSchema, CacheInvalidationOutputSchema } from '../schemas/output-schemas.js';
@@ -51,17 +50,19 @@ const BatchPriceInputSchema = {
 /**
  * Register the price tool
  */
-export function registerPriceTool(server: McpServer): void {
-  server.registerTool(
-    'get_price',
-    {
-      title: 'Get Asset Price',
-      description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
-      inputSchema: PriceInputSchema as any,
-      outputSchema: PriceOutputSchema as any,
-    },
-    (async (args: { symbol: string; assetType?: 'stock' | 'crypto' }, _extra: any) => {
-      const { symbol, assetType } = args;
+/**
+ * Register the price tool
+ */
+export function registerPriceTool(): void {
+  registerTool({
+    name: 'get_price',
+    description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: PriceInputSchema,
+    outputSchema: PriceOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, assetType } = args as { symbol: string; assetType?: 'stock' | 'crypto' };
       const startTime = Date.now();
 
       try {
@@ -118,31 +119,26 @@ export function registerPriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_price',
-    description: 'Get current price for stocks and cryptocurrencies',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the batch price tool
  */
-export function registerBatchPriceTool(server: McpServer): void {
-  server.registerTool(
-    'get_batch_prices',
-    {
-      title: 'Get Multiple Asset Prices',
-      description: 'Get current price data for multiple stocks or cryptocurrencies at once. Maximum 50 symbols. Data is cached for 5 minutes.',
-      inputSchema: BatchPriceInputSchema as any,
-      outputSchema: BatchPricesOutputSchema as any, // Context Protocol requirement
-    },
-    (async (args: { symbols: string[]; assetType?: 'stock' | 'crypto' }, _extra: any) => {
-      const { symbols, assetType } = args;
+/**
+ * Register the batch price tool
+ */
+export function registerBatchPriceTool(): void {
+  registerTool({
+    name: 'get_batch_prices',
+    description: 'Get current price data for multiple stocks or cryptocurrencies at once. Maximum 50 symbols. Data is cached for 5 minutes.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: BatchPriceInputSchema,
+    outputSchema: BatchPricesOutputSchema,
+    handler: async (args: any) => {
+      const { symbols, assetType } = args as { symbols: string[]; assetType?: 'stock' | 'crypto' };
       const startTime = Date.now();
 
       try {
@@ -210,40 +206,35 @@ export function registerBatchPriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_batch_prices',
-    description: 'Get current prices for multiple assets at once',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the cache invalidation tool
  */
-export function registerInvalidatePriceTool(server: McpServer): void {
-  server.registerTool(
-    'invalidate_price_cache',
-    {
-      title: 'Invalidate Price Cache',
-      description: 'Clear cached price data for a specific symbol to force a fresh fetch',
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          symbol: {
-            type: "string" as const,
-            description: "Asset symbol to invalidate",
-          },
+/**
+ * Register the cache invalidation tool
+ */
+export function registerInvalidatePriceTool(): void {
+  registerTool({
+    name: 'invalidate_price_cache',
+    description: 'Clear cached price data for a specific symbol to force a fresh fetch',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        symbol: {
+          type: "string" as const,
+          description: "Asset symbol to invalidate",
         },
-        required: ["symbol"],
-      } as any,
-      outputSchema: CacheInvalidationOutputSchema as any,
+      },
+      required: ["symbol"],
     },
-    (async (args: { symbol: string }, _extra: any) => {
-      const { symbol } = args;
+    outputSchema: CacheInvalidationOutputSchema,
+    handler: async (args: any) => {
+      const { symbol } = args as { symbol: string };
       try {
         const invalidated = await invalidatePrice(symbol);
 
@@ -281,14 +272,7 @@ export function registerInvalidatePriceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'invalidate_price_cache',
-    description: 'Clear cached price data for a symbol',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 

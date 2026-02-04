@@ -3,8 +3,7 @@
  * MCP tool for fetching perpetual futures funding rates
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { addToRegistry } from './registry.js';
+import { registerTool } from './registry.js';
 import { FundingRate } from '../types.js';
 import { getCacheService } from '../cache/index.js';
 import {
@@ -72,17 +71,19 @@ const FundingRateStatsInputSchema = {
 /**
  * Register the funding rate tool
  */
-export function registerFundingRateTool(server: McpServer): void {
-  server.registerTool(
-    'get_funding_rate',
-    {
-      title: 'Get Perpetual Funding Rate',
-      description: 'Get current funding rate for crypto perpetual futures. Funding rates indicate long/short sentiment. Positive rates mean longs pay shorts (bullish), negative means shorts pay longs (bearish). Data cached for 15 minutes.',
-      inputSchema: FundingRateInputSchema as any,
-      outputSchema: FundingRateOutputSchema as any,
-    },
-    (async (args: { symbol: string }, _extra: any) => {
-      const { symbol } = args;
+/**
+ * Register the funding rate tool
+ */
+export function registerFundingRateTool(): void {
+  registerTool({
+    name: 'get_funding_rate',
+    description: 'Get current funding rate for crypto perpetual futures. Funding rates indicate long/short sentiment. Positive rates mean longs pay shorts (bullish), negative means shorts pay longs (bearish). Data cached for 15 minutes.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: FundingRateInputSchema,
+    outputSchema: FundingRateOutputSchema,
+    handler: async (args: any) => {
+      const { symbol } = args as { symbol: string };
       const startTime = Date.now();
 
       try {
@@ -146,31 +147,26 @@ export function registerFundingRateTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_funding_rate',
-    description: 'Get current perpetual funding rate for crypto',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the batch funding rates tool
  */
-export function registerBatchFundingRatesTool(server: McpServer): void {
-  server.registerTool(
-    'get_batch_funding_rates',
-    {
-      title: 'Get Multiple Funding Rates',
-      description: 'Get current funding rates for multiple perpetual futures at once. Maximum 50 symbols. Data cached for 15 minutes.',
-      inputSchema: BatchFundingRateInputSchema as any,
-      outputSchema: BatchPricesOutputSchema as any,
-    },
-    (async (args: { symbols: string[] }, _extra: any) => {
-      const { symbols } = args;
+/**
+ * Register the batch funding rates tool
+ */
+export function registerBatchFundingRatesTool(): void {
+  registerTool({
+    name: 'get_batch_funding_rates',
+    description: 'Get current funding rates for multiple perpetual futures at once. Maximum 50 symbols. Data cached for 15 minutes.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: BatchFundingRateInputSchema,
+    outputSchema: BatchPricesOutputSchema,
+    handler: async (args: any) => {
+      const { symbols } = args as { symbols: string[] };
       const startTime = Date.now();
 
       try {
@@ -252,30 +248,25 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_batch_funding_rates',
-    description: 'Get current funding rates for multiple perpetuals at once',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the all funding rates tool
  */
-export function registerAllFundingRatesTool(server: McpServer): void {
-  server.registerTool(
-    'get_all_funding_rates',
-    {
-      title: 'Get All Funding Rates',
-      description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
-      inputSchema: { type: "object" as const, properties: {} } as any,
-      outputSchema: BatchPricesOutputSchema as any,
-    },
-    (async (_args: Record<string, never>, _extra: any) => {
+/**
+ * Register the all funding rates tool
+ */
+export function registerAllFundingRatesTool(): void {
+  registerTool({
+    name: 'get_all_funding_rates',
+    description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: { type: "object" as const, properties: {} },
+    outputSchema: BatchPricesOutputSchema,
+    handler: async (_args: any) => {
       const startTime = Date.now();
 
       try {
@@ -335,31 +326,26 @@ export function registerAllFundingRatesTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_all_funding_rates',
-    description: 'Get current funding rates for all available perpetuals',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the funding rate statistics tool
  */
-export function registerFundingRateStatsTool(server: McpServer): void {
-  server.registerTool(
-    'get_funding_rate_stats',
-    {
-      title: 'Get Funding Rate Statistics',
-      description: 'Get statistical analysis of historical funding rates including average, high, low, and trends. Useful for understanding funding rate behavior over time.',
-      inputSchema: FundingRateStatsInputSchema as any,
-      outputSchema: FundingRateStatsOutputSchema as any,
-    },
-    (async (args: { symbol: string; limit?: number }, _extra: any) => {
-      const { symbol, limit } = args;
+/**
+ * Register the funding rate statistics tool
+ */
+export function registerFundingRateStatsTool(): void {
+  registerTool({
+    name: 'get_funding_rate_stats',
+    description: 'Get statistical analysis of historical funding rates including average, high, low, and trends. Useful for understanding funding rate behavior over time.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: FundingRateStatsInputSchema,
+    outputSchema: FundingRateStatsOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, limit } = args as { symbol: string; limit?: number };
       const startTime = Date.now();
 
       try {
@@ -409,30 +395,25 @@ export function registerFundingRateStatsTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_funding_rate_stats',
-    description: 'Get statistical analysis of historical funding rates',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register supported symbols list tool
  */
-export function registerSupportedPerpetualsTool(server: McpServer): void {
-  server.registerTool(
-    'list_supported_perpetuals',
-    {
-      title: 'List Supported Perpetuals',
-      description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
-      inputSchema: { type: "object" as const, properties: {} } as any,
-      outputSchema: ListSupportedPerpetualsOutputSchema as any,
-    },
-    (async (_args: Record<string, never>, _extra: any) => {
+/**
+ * Register supported symbols list tool
+ */
+export function registerSupportedPerpetualsTool(): void {
+  registerTool({
+    name: 'list_supported_perpetuals',
+    description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
+    category: 'prices',
+    version: '0.1.0',
+    inputSchema: { type: "object" as const, properties: {} },
+    outputSchema: ListSupportedPerpetualsOutputSchema,
+    handler: async (_args: any) => {
       const symbols = getSupportedPerpetualSymbols();
 
       const structuredData = {
@@ -450,14 +431,7 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
         ],
         structuredContent: structuredData,
       };
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'list_supported_perpetuals',
-    description: 'List all supported perpetual futures symbols',
-    category: 'prices',
-    version: '0.1.0',
+    }
   });
 }
 

@@ -3,7 +3,7 @@
  * Implements the Model Context Protocol server using @modelcontextprotocol/sdk
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { mcpMetadata } from './config.js';
 import { registerTools } from './tools/registry.js';
@@ -15,16 +15,27 @@ import { initializeRedis, shutdownRedis } from './cache/index.js';
  * Manages server lifecycle, tool registration, and health checks
  */
 export class TradingIntelligenceServer {
-  private server: McpServer;
+  private server: Server;
   private transport?: StdioServerTransport;
   private isConnected: boolean = false;
 
   constructor() {
     // Initialize MCP server with metadata
-    this.server = new McpServer({
-      name: mcpMetadata.name,
-      version: mcpMetadata.version,
-    });
+    this.server = new Server(
+      {
+        name: mcpMetadata.name,
+        version: mcpMetadata.version,
+      },
+      {
+        capabilities: {
+          tools: {
+            listChanged: true
+          },
+          resources: {},
+          prompts: {},
+        },
+      }
+    );
 
     console.log(`📡 Initializing ${mcpMetadata.name} v${mcpMetadata.version}`);
   }
@@ -149,7 +160,7 @@ export class TradingIntelligenceServer {
   /**
    * Get the underlying MCP server instance
    */
-  getMcpServer(): McpServer {
+  getMcpServer(): Server {
     return this.server;
   }
 }

@@ -5,7 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import express, { Request, Response } from 'express';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createContextMiddleware } from '@ctxprotocol/sdk';
@@ -19,7 +19,7 @@ import { initializeRedis, shutdownRedis } from './cache/index.js';
  */
 export class HttpMcpServer {
   private app: express.Application;
-  private mcpServer: McpServer;
+  private mcpServer: Server;
   private port: number;
   private server: any;
   private transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -29,10 +29,19 @@ export class HttpMcpServer {
     this.port = config.port;
 
     // Initialize MCP server with capabilities
-    this.mcpServer = new McpServer(
+    this.mcpServer = new Server(
       {
         name: mcpMetadata.name,
         version: mcpMetadata.version,
+      },
+      {
+        capabilities: {
+          tools: {
+            listChanged: true
+          },
+          resources: {},
+          prompts: {},
+        },
       }
     );
 

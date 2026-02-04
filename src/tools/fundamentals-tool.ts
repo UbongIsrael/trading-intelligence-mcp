@@ -3,8 +3,7 @@
  * MCP tools for fetching company fundamental data
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { addToRegistry } from './registry.js';
+import { registerTool } from './registry.js';
 import { getCacheService } from '../cache/index.js';
 import {
   fetchCompanyOverview,
@@ -95,16 +94,18 @@ const FullFundamentalsInputSchema = {
 /**
  * Register the company overview tool
  */
-export function registerCompanyOverviewTool(server: McpServer): void {
-  server.registerTool(
-    'get_company_overview',
-    {
-      title: 'Get Company Overview',
-      description: 'Get company profile and key financial metrics for a stock. Includes sector, market cap, P/E ratio, EPS, 52-week range, and more. Data cached for 1 hour.',
-      inputSchema: CompanyOverviewInputSchema as any,
-      outputSchema: CompanyOverviewOutputSchema as any,
-    },
-    async (args: any, _extra: any) => {
+/**
+ * Register the company overview tool
+ */
+export function registerCompanyOverviewTool(): void {
+  registerTool({
+    name: 'get_company_overview',
+    description: 'Get company profile and key financial metrics for a stock. Includes sector, market cap, P/E ratio, EPS, 52-week range, and more. Data cached for 1 hour.',
+    category: 'fundamental',
+    version: '0.1.0',
+    inputSchema: CompanyOverviewInputSchema,
+    outputSchema: CompanyOverviewOutputSchema,
+    handler: async (args: any) => {
       const { symbol } = args as { symbol: string };
       const startTime = Date.now();
 
@@ -188,29 +189,24 @@ export function registerCompanyOverviewTool(server: McpServer): void {
         };
       }
     }
-  );
-
-  addToRegistry({
-    name: 'get_company_overview',
-    description: 'Get company profile and key financial metrics',
-    category: 'fundamental',
-    version: '0.1.0',
   });
 }
 
 /**
  * Register the earnings tool
  */
-export function registerEarningsTool(server: McpServer): void {
-  server.registerTool(
-    'get_earnings',
-    {
-      title: 'Get Earnings Data',
-      description: 'Get quarterly earnings data including EPS estimates, actuals, and surprise percentages. Shows analyst expectations vs actual performance. Data cached for 1 hour.',
-      inputSchema: EarningsInputSchema as any,
-      outputSchema: EarningsOutputSchema as any,
-    },
-    async (args: any, _extra: any) => {
+/**
+ * Register the earnings tool
+ */
+export function registerEarningsTool(): void {
+  registerTool({
+    name: 'get_earnings',
+    description: 'Get quarterly earnings data including EPS estimates, actuals, and surprise percentages. Shows analyst expectations vs actual performance. Data cached for 1 hour.',
+    category: 'fundamental',
+    version: '0.1.0',
+    inputSchema: EarningsInputSchema,
+    outputSchema: EarningsOutputSchema,
+    handler: async (args: any) => {
       const { symbol, limit } = args as { symbol: string; limit?: number };
       const startTime = Date.now();
 
@@ -282,29 +278,24 @@ export function registerEarningsTool(server: McpServer): void {
         };
       }
     }
-  );
-
-  addToRegistry({
-    name: 'get_earnings',
-    description: 'Get quarterly earnings data with estimates and surprises',
-    category: 'fundamental',
-    version: '0.1.0',
   });
 }
 
 /**
  * Register the financial statements tool
  */
-export function registerFinancialStatementsTool(server: McpServer): void {
-  server.registerTool(
-    'get_financial_statements',
-    {
-      title: 'Get Financial Statements',
-      description: 'Get company financial statements including balance sheet, income statement, and cash flow data. Available for annual or quarterly periods. Data cached for 1 hour.',
-      inputSchema: FinancialStatementsInputSchema as any,
-      outputSchema: FinancialStatementsOutputSchema as any,
-    },
-    async (args: any, _extra: any) => {
+/**
+ * Register the financial statements tool
+ */
+export function registerFinancialStatementsTool(): void {
+  registerTool({
+    name: 'get_financial_statements',
+    description: 'Get company financial statements including balance sheet, income statement, and cash flow data. Available for annual or quarterly periods. Data cached for 1 hour.',
+    category: 'fundamental',
+    version: '0.1.0',
+    inputSchema: FinancialStatementsInputSchema,
+    outputSchema: FinancialStatementsOutputSchema,
+    handler: async (args: any) => {
       const { symbol, period, limit } = args as { symbol: string; period?: string; limit?: number };
       const startTime = Date.now();
 
@@ -392,29 +383,24 @@ export function registerFinancialStatementsTool(server: McpServer): void {
         };
       }
     }
-  );
-
-  addToRegistry({
-    name: 'get_financial_statements',
-    description: 'Get company financial statements (balance sheet, income, cash flow)',
-    category: 'fundamental',
-    version: '0.1.0',
   });
 }
 
 /**
  * Register the full fundamentals tool
  */
-export function registerFullFundamentalsTool(server: McpServer): void {
-  server.registerTool(
-    'get_full_fundamentals',
-    {
-      title: 'Get Full Fundamentals',
-      description: 'Get comprehensive fundamental data for a stock including company overview, earnings history, and key financial ratios. Best for complete fundamental analysis. Data cached for 1 hour.',
-      inputSchema: FullFundamentalsInputSchema as any,
-      outputSchema: FullFundamentalsOutputSchema as any,
-    },
-    async (args: any, _extra: any) => {
+/**
+ * Register the full fundamentals tool
+ */
+export function registerFullFundamentalsTool(): void {
+  registerTool({
+    name: 'get_full_fundamentals',
+    description: 'Get comprehensive fundamental data for a stock including company overview, earnings history, and key financial ratios. Best for complete fundamental analysis. Data cached for 1 hour.',
+    category: 'fundamental',
+    version: '0.1.0',
+    inputSchema: FullFundamentalsInputSchema,
+    outputSchema: FullFundamentalsOutputSchema,
+    handler: async (args: any) => {
       const { symbol } = args as { symbol: string };
       const startTime = Date.now();
 
@@ -518,13 +504,6 @@ export function registerFullFundamentalsTool(server: McpServer): void {
         };
       }
     }
-  );
-
-  addToRegistry({
-    name: 'get_full_fundamentals',
-    description: 'Get comprehensive fundamental analysis for a stock',
-    category: 'fundamental',
-    version: '0.1.0',
   });
 }
 

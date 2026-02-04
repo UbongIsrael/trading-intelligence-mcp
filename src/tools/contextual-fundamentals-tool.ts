@@ -1,6 +1,5 @@
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { addToRegistry } from './registry.js';
+import { registerTool } from './registry.js';
 import { getCacheService } from '../cache/index.js';
 import {
     fetchCompanyOverview,
@@ -52,17 +51,19 @@ const ContextualFundamentalsInputSchema = {
 /**
  * Register the contextual fundamentals tool
  */
-export function registerContextualFundamentalsTool(server: McpServer): void {
-    server.registerTool(
-        'get_contextual_fundamentals',
-        {
-            title: 'Get Contextual Fundamental Analysis',
-            description: 'Get company fundamentals with YoY changes, pattern detection, and contextual insights. Saves 30+ minutes of manual analysis by flagging unusual patterns and generating actionable insights.',
-            inputSchema: ContextualFundamentalsInputSchema as any,
-            outputSchema: ContextualFundamentalsOutputSchema as any,
-        },
-        (async (args: { symbol: string; includeInsider?: boolean; includeEvents?: boolean }, _extra: any) => {
-            const { symbol, includeInsider = true, includeEvents = true } = args;
+/**
+ * Register the contextual fundamentals tool
+ */
+export function registerContextualFundamentalsTool(): void {
+    registerTool({
+        name: 'get_contextual_fundamentals',
+        description: 'Get company fundamentals with YoY changes, pattern detection, and contextual insights. Saves 30+ minutes of manual analysis by flagging unusual patterns and generating actionable insights.',
+        category: 'fundamental',
+        version: '0.1.0',
+        inputSchema: ContextualFundamentalsInputSchema,
+        outputSchema: ContextualFundamentalsOutputSchema,
+        handler: async (args: any) => {
+            const { symbol, includeInsider = true, includeEvents = true } = args as { symbol: string; includeInsider?: boolean; includeEvents?: boolean };
             const startTime = Date.now();
 
             if (!isAlphaVantageConfigured()) {
@@ -167,14 +168,7 @@ export function registerContextualFundamentalsTool(server: McpServer): void {
                     isError: true
                 };
             }
-        }) as any
-    );
-
-    addToRegistry({
-        name: 'get_contextual_fundamentals',
-        description: 'Get company fundamentals with YoY changes, pattern detection, and contextual insights',
-        category: 'fundamental',
-        version: '0.1.0'
+        }
     });
 }
 

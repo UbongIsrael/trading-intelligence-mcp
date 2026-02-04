@@ -3,8 +3,7 @@
  * MCP tools for identifying support and resistance levels
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { addToRegistry } from './registry.js';
+import { registerTool } from './registry.js';
 import { TechnicalAnalysis } from '../types.js';
 import { getCacheService } from '../cache/index.js';
 import {
@@ -88,17 +87,19 @@ const PriceLevelAnalysisInputSchema = {
 /**
  * Register the liquidity zones tool
  */
-export function registerLiquidityZonesTool(server: McpServer): void {
-  server.registerTool(
-    'get_liquidity_zones',
-    {
-      title: 'Get Liquidity Zones',
-      description: 'Identify key support and resistance levels (liquidity zones) for any trading symbol. Returns the top 5 most significant price levels based on historical pivot points, with strength ratings and touch counts. Data cached for 30 minutes.',
-      inputSchema: LiquidityZonesInputSchema as any,
-      outputSchema: LiquidityZoneOutputSchema as any,
-    },
-    (async (args: { symbol: string; timeframe?: string; lookbackDays?: number }, _extra: any) => {
-      const { symbol, timeframe, lookbackDays } = args;
+/**
+ * Register the liquidity zones tool
+ */
+export function registerLiquidityZonesTool(): void {
+  registerTool({
+    name: 'get_liquidity_zones',
+    description: 'Identify key support and resistance levels (liquidity zones) for any trading symbol. Returns the top 5 most significant price levels based on historical pivot points, with strength ratings and touch counts. Data cached for 30 minutes.',
+    category: 'technical',
+    version: '0.1.0',
+    inputSchema: LiquidityZonesInputSchema,
+    outputSchema: LiquidityZoneOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, timeframe, lookbackDays } = args as { symbol: string; timeframe?: string; lookbackDays?: number };
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -184,31 +185,26 @@ export function registerLiquidityZonesTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_liquidity_zones',
-    description: 'Get support/resistance liquidity zones for any trading symbol',
-    category: 'technical',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the support/resistance tool
  */
-export function registerSupportResistanceTool(server: McpServer): void {
-  server.registerTool(
-    'get_support_resistance',
-    {
-      title: 'Get Support & Resistance',
-      description: 'Get the nearest support and resistance levels for a trading symbol. Returns just the key levels closest to current price - perfect for quick trading decisions. Data cached for 30 minutes.',
-      inputSchema: SupportResistanceInputSchema as any,
-      outputSchema: SupportResistanceOutputSchema as any,
-    },
-    (async (args: { symbol: string; timeframe?: string }, _extra: any) => {
-      const { symbol, timeframe } = args;
+/**
+ * Register the support/resistance tool
+ */
+export function registerSupportResistanceTool(): void {
+  registerTool({
+    name: 'get_support_resistance',
+    description: 'Get the nearest support and resistance levels for a trading symbol. Returns just the key levels closest to current price - perfect for quick trading decisions. Data cached for 30 minutes.',
+    category: 'technical',
+    version: '0.1.0',
+    inputSchema: SupportResistanceInputSchema,
+    outputSchema: SupportResistanceOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, timeframe } = args as { symbol: string; timeframe?: string };
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -291,31 +287,26 @@ export function registerSupportResistanceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_support_resistance',
-    description: 'Get nearest support and resistance levels',
-    category: 'technical',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register the price level analysis tool
  */
-export function registerPriceLevelAnalysisTool(server: McpServer): void {
-  server.registerTool(
-    'analyze_price_levels',
-    {
-      title: 'Analyze Price Levels',
-      description: 'Get comprehensive price level analysis including all support/resistance zones, distances from current price, trend direction, and trading recommendations. Ideal for detailed technical analysis. Data cached for 30 minutes.',
-      inputSchema: PriceLevelAnalysisInputSchema as any,
-      outputSchema: PriceLevelAnalysisOutputSchema as any,
-    },
-    (async (args: { symbol: string; currentPrice?: number; timeframe?: string }, _extra: any) => {
-      const { symbol, currentPrice, timeframe } = args;
+/**
+ * Register the price level analysis tool
+ */
+export function registerPriceLevelAnalysisTool(): void {
+  registerTool({
+    name: 'analyze_price_levels',
+    description: 'Get comprehensive price level analysis including all support/resistance zones, distances from current price, trend direction, and trading recommendations. Ideal for detailed technical analysis. Data cached for 30 minutes.',
+    category: 'technical',
+    version: '0.1.0',
+    inputSchema: PriceLevelAnalysisInputSchema,
+    outputSchema: PriceLevelAnalysisOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, currentPrice, timeframe } = args as { symbol: string; currentPrice?: number; timeframe?: string };
       const startTime = Date.now();
       const effectiveTimeframe = timeframe || '1d';
 
@@ -414,14 +405,7 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'analyze_price_levels',
-    description: 'Comprehensive price level analysis with recommendations',
-    category: 'technical',
-    version: '0.1.0',
+    }
   });
 }
 
@@ -683,7 +667,11 @@ function capitalizeFirst(str: string): string {
  * Register quick support/resistance tool (uses simpler getSupportResistanceLevels function)
  * This is a leaner alternative that bypasses the full zone analysis
  */
-export function registerQuickSupportResistanceTool(server: McpServer): void {
+/**
+ * Register quick support/resistance tool (uses simpler getSupportResistanceLevels function)
+ * This is a leaner alternative that bypasses the full zone analysis
+ */
+export function registerQuickSupportResistanceTool(): void {
   const QuickSRInputSchema = {
     type: "object" as const,
     properties: {
@@ -700,16 +688,15 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
     required: ["symbol"],
   };
 
-  server.registerTool(
-    'quick_support_resistance',
-    {
-      title: 'Quick Support & Resistance',
-      description: 'Get just the nearest support and resistance levels with minimal overhead. Uses the streamlined getSupportResistanceLevels function. For full zone analysis with caching, use get_support_resistance instead.',
-      inputSchema: QuickSRInputSchema as any,
-      outputSchema: SupportResistanceOutputSchema as any,
-    },
-    (async (args: { symbol: string; timeframe?: string }, _extra: any) => {
-      const { symbol, timeframe } = args;
+  registerTool({
+    name: 'quick_support_resistance',
+    description: 'Get just the nearest support and resistance levels with minimal overhead. Uses the streamlined getSupportResistanceLevels function. For full zone analysis with caching, use get_support_resistance instead.',
+    category: 'technical',
+    version: '0.1.0',
+    inputSchema: QuickSRInputSchema,
+    outputSchema: SupportResistanceOutputSchema,
+    handler: async (args: any) => {
+      const { symbol, timeframe } = args as { symbol: string; timeframe?: string };
       const effectiveTimeframe = timeframe || '1d';
       const validTimeframes = getAvailableTimeframes();
 
@@ -805,30 +792,25 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
           isError: true,
         };
       }
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'quick_support_resistance',
-    description: 'Fast support/resistance levels without full zone analysis',
-    category: 'technical',
-    version: '0.1.0',
+    }
   });
 }
 
 /**
  * Register available timeframes tool
  */
-export function registerAvailableTimeframesTool(server: McpServer): void {
-  server.registerTool(
-    'get_available_timeframes',
-    {
-      title: 'Get Available Timeframes',
-      description: 'Get the list of available timeframes for liquidity zone analysis.',
-      inputSchema: { type: "object" as const, properties: {} } as any,
-      outputSchema: AvailableTimeframesOutputSchema as any,
-    },
-    (async (_args: Record<string, never>, _extra: any) => {
+/**
+ * Register available timeframes tool
+ */
+export function registerAvailableTimeframesTool(): void {
+  registerTool({
+    name: 'get_available_timeframes',
+    description: 'Get the list of available timeframes for liquidity zone analysis.',
+    category: 'technical',
+    version: '0.1.0',
+    inputSchema: { type: "object" as const, properties: {} },
+    outputSchema: AvailableTimeframesOutputSchema,
+    handler: async (_args: any) => {
       const timeframes = getAvailableTimeframes();
 
       const descriptions: Record<string, string> = {
@@ -855,13 +837,6 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
         content: [{ type: 'text', text: lines.join('\n') }],
         structuredContent: structuredData,
       };
-    }) as any
-  );
-
-  addToRegistry({
-    name: 'get_available_timeframes',
-    description: 'List available timeframes for analysis',
-    category: 'technical',
-    version: '0.1.0',
+    }
   });
 }

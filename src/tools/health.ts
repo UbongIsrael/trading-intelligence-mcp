@@ -3,9 +3,7 @@
  * Provides system health and diagnostic information
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-
-import { addToRegistry, getRegisteredTools } from './registry.js';
+import { getRegisteredTools, registerTool } from './registry.js';
 import { config } from '../config.js';
 import { getCacheService } from '../cache/index.js';
 import { HealthCheckOutputSchema } from '../schemas/output-schemas.js';
@@ -13,27 +11,33 @@ import { HealthCheckOutputSchema } from '../schemas/output-schemas.js';
 /**
  * Register the health check tool
  */
-export function registerHealthCheckTool(server: McpServer): void {
-  server.registerTool(
-    'health_check',
-    {
-      title: 'Health Check',
-      description: 'Get server health status and system diagnostics',
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          detailed: {
-            type: "boolean" as const,
-            description: "Include detailed diagnostic information",
-          },
+/**
+ * Register the health check tool
+ */
+export async function registerHealthCheckTool(): Promise<void> {
+
+
+  registerTool({
+    name: 'health_check',
+    description: 'Get server health status and system diagnostics',
+    category: 'system',
+    version: '0.1.0',
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        detailed: {
+          type: "boolean" as const,
+          description: "Include detailed diagnostic information",
         },
-      } as any,
-      outputSchema: HealthCheckOutputSchema as any,
+      },
     },
-    async (args: any) => {
+    outputSchema: HealthCheckOutputSchema as any,
+    handler: async (args: any) => {
       const { detailed = false } = args as { detailed?: boolean };
-      const toolCount = getRegisteredTools().length;
-      const healthData = await getHealthData(detailed, toolCount);
+      // count might change at runtime, so we fetch it again inside handler or trust the one captured?
+      // Better to fetch current count inside handler to be accurate.
+      const currentToolCount = getRegisteredTools().length;
+      const healthData = await getHealthData(detailed, currentToolCount);
 
       // Create schema-compliant structured data
       const structuredData = {
@@ -45,7 +49,7 @@ export function registerHealthCheckTool(server: McpServer): void {
           latency: healthData.services?.redis?.latency || '0ms',
           hitRate: healthData.cache?.hitRate || '0%',
         },
-        tools: toolCount,
+        tools: currentToolCount,
         integrations: {
           yahooFinance: 'operational',
           coinGecko: 'operational',
@@ -65,13 +69,6 @@ export function registerHealthCheckTool(server: McpServer): void {
         structuredContent: structuredData,
       };
     }
-  );
-
-  addToRegistry({
-    name: 'health_check',
-    description: 'System health and diagnostics',
-    category: 'system',
-    version: '0.1.0',
   });
 }
 
