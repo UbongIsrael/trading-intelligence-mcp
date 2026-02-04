@@ -753,10 +753,10 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
     {
       title: 'Get Available Timeframes',
       description: 'Get the list of available timeframes for liquidity zone analysis.',
-      inputSchema: {} as any,
+      inputSchema: z.object({}) as any,
       outputSchema: AvailableTimeframesOutputSchema as any,
     },
-    (async (_extra: any) => {
+    (async (_args: Record<string, never>, _extra: any) => {
       const timeframes = getAvailableTimeframes();
 
       const descriptions: Record<string, string> = {

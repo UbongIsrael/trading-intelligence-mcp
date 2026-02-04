@@ -241,10 +241,10 @@ export function registerAllFundingRatesTool(server: McpServer): void {
     {
       title: 'Get All Funding Rates',
       description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
-      inputSchema: {} as any,
+      inputSchema: z.object({}) as any,
       outputSchema: BatchPricesOutputSchema as any,
     },
-    (async (_extra: any) => {
+    (async (_args: Record<string, never>, _extra: any) => {
       const startTime = Date.now();
 
       try {
@@ -381,10 +381,10 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
     {
       title: 'List Supported Perpetuals',
       description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
-      inputSchema: {} as any,
+      inputSchema: z.object({}) as any,
       outputSchema: ListSupportedPerpetualsOutputSchema as any,
     },
-    (async (_extra: any) => {
+    (async (_args: Record<string, never>, _extra: any) => {
       const symbols = getSupportedPerpetualSymbols();
 
       const structuredData = {
