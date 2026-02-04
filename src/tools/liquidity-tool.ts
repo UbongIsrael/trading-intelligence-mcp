@@ -156,6 +156,16 @@ export function registerLiquidityZonesTool(server: McpServer): void {
               text: `Error analyzing liquidity zones for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            zones: [],
+            support: null,
+            resistance: null,
+            trend: 'unknown',
+            cached: false,
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -253,6 +263,16 @@ export function registerSupportResistanceTool(server: McpServer): void {
               text: `Error fetching support/resistance for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            support: null,
+            resistance: null,
+            distanceToSupport: null,
+            distanceToResistance: null,
+            cached: false,
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -293,6 +313,16 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
                 text: `Invalid symbol format: ${symbol}. Please use standard ticker symbols (e.g., AAPL, TSLA, BTC).`,
               },
             ],
+            structuredContent: {
+              symbol: symbol,
+              currentPrice: 0,
+              allZones: [],
+              distances: { nearestSupport: 'N/A', nearestResistance: 'N/A' },
+              trend: 'unknown',
+              recommendation: 'Invalid symbol',
+              error: 'Invalid symbol format',
+            },
+            isError: true,
           };
         }
 
@@ -356,6 +386,16 @@ export function registerPriceLevelAnalysisTool(server: McpServer): void {
               text: `Error analyzing price levels for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            currentPrice: 0,
+            allZones: [],
+            distances: { nearestSupport: 'N/A', nearestResistance: 'N/A' },
+            trend: 'unknown',
+            recommendation: 'Error occurred',
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -731,6 +771,16 @@ export function registerQuickSupportResistanceTool(server: McpServer): void {
               text: `Error fetching S/R for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            support: null,
+            resistance: null,
+            distanceToSupport: null,
+            distanceToResistance: null,
+            cached: false,
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any

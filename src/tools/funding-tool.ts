@@ -119,6 +119,18 @@ export function registerFundingRateTool(server: McpServer): void {
               text: `Error fetching funding rate for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            fundingRate: 0,
+            fundingRatePercent: '0',
+            nextFundingTime: '',
+            interpretation: 'Error',
+            annualizedRate: '0',
+            source: 'error',
+            cached: false,
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -219,6 +231,12 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
               text: `Error fetching batch funding rates: ${error.message}`,
             },
           ],
+          structuredContent: {
+            prices: [],
+            timestamp: new Date().toISOString(),
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -296,6 +314,12 @@ export function registerAllFundingRatesTool(server: McpServer): void {
               text: `Error fetching all funding rates: ${error.message}`,
             },
           ],
+          structuredContent: {
+            prices: [],
+            timestamp: new Date().toISOString(),
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any
@@ -359,6 +383,17 @@ export function registerFundingRateStatsTool(server: McpServer): void {
               text: `Error fetching funding rate statistics for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            current: 0,
+            average: 0,
+            high: 0,
+            low: 0,
+            trend: 'unknown',
+            dataPoints: 0,
+            error: error.message,
+          },
+          isError: true,
         };
       }
     }) as any

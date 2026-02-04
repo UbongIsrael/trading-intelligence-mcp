@@ -90,6 +90,18 @@ export function registerPriceTool(server: McpServer): void {
               text: `Error fetching price for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            symbol: symbol,
+            price: 0,
+            change: 0,
+            changePercent: 0,
+            volume: 0,
+            marketCap: 0,
+            timestamp: new Date().toISOString(),
+            source: 'error',
+            cached: false,
+            error: error.message,
+          },
           isError: true,
         };
       }
@@ -177,6 +189,11 @@ export function registerBatchPriceTool(server: McpServer): void {
               text: `Error fetching batch prices: ${error.message}`,
             },
           ],
+          structuredContent: {
+            prices: [],
+            timestamp: new Date().toISOString(),
+            error: error.message,
+          },
           isError: true,
         };
       }
@@ -234,6 +251,11 @@ export function registerInvalidatePriceTool(server: McpServer): void {
               text: `Error invalidating cache for ${symbol}: ${error.message}`,
             },
           ],
+          structuredContent: {
+            success: false,
+            symbol: symbol,
+            message: `Error: ${error.message}`,
+          },
           isError: true,
         };
       }
