@@ -44,7 +44,7 @@ export function registerPriceTool(server: McpServer): void {
     {
       title: 'Get Asset Price',
       description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
-      inputSchema: PriceInputSchema.shape as any, // Context Protocol requirement
+      inputSchema: PriceInputSchema as any, // Context Protocol requirement
       outputSchema: PriceOutputSchema as any, // Context Protocol requirement
     },
     (async (args: { symbol: string; assetType?: 'stock' | 'crypto' }, _extra: any) => {
@@ -111,7 +111,7 @@ export function registerBatchPriceTool(server: McpServer): void {
     {
       title: 'Get Multiple Asset Prices',
       description: 'Get current price data for multiple stocks or cryptocurrencies at once. Maximum 50 symbols. Data is cached for 5 minutes.',
-      inputSchema: BatchPriceInputSchema.shape as any,
+      inputSchema: BatchPriceInputSchema as any,
       outputSchema: BatchPricesOutputSchema as any, // Context Protocol requirement
     },
     (async (args: { symbols: string[]; assetType?: 'stock' | 'crypto' }, _extra: any) => {
