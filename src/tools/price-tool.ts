@@ -65,7 +65,9 @@ export function registerPriceTool(server: McpServer): void {
           changePercent: result.data.changePercent24h || 0,
           volume: result.data.volume24h || 0,
           marketCap: result.data.marketCap || 0,
-          timestamp: result.data.timestamp.toISOString(),
+          timestamp: result.data.timestamp instanceof Date
+            ? result.data.timestamp.toISOString()
+            : String(result.data.timestamp),
           source: result.data.source,
           cached: result.cached,
         };
@@ -134,7 +136,9 @@ export function registerBatchPriceTool(server: McpServer): void {
           changePercent: result.data.changePercent24h || 0,
           volume: result.data.volume24h || 0,
           marketCap: result.data.marketCap || 0,
-          timestamp: result.data.timestamp.toISOString(),
+          timestamp: result.data.timestamp instanceof Date
+            ? result.data.timestamp.toISOString()
+            : String(result.data.timestamp),
           source: result.data.source,
           cached: result.cached,
         }));

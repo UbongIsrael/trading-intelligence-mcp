@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
+import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { FundingRate } from '../types.js';
 import { getCacheService } from '../cache/index.js';
@@ -65,10 +65,11 @@ export function registerFundingRateTool(server: McpServer): void {
     {
       title: 'Get Perpetual Funding Rate',
       description: 'Get current funding rate for crypto perpetual futures. Funding rates indicate long/short sentiment. Positive rates mean longs pay shorts (bullish), negative means shorts pay longs (bearish). Data cached for 15 minutes.',
-      inputSchema: FundingRateInputSchema,
+      inputSchema: FundingRateInputSchema as any,
       outputSchema: FundingRateOutputSchema as any,
     },
-    async ({ symbol }) => {
+    (async (args: { symbol: string }, _extra: any) => {
+      const { symbol } = args;
       const startTime = Date.now();
 
       try {
@@ -91,7 +92,9 @@ export function registerFundingRateTool(server: McpServer): void {
           symbol: result.data.symbol,
           fundingRate: result.data.rate,
           fundingRatePercent: ratePercent,
-          nextFundingTime: result.data.nextFundingTime?.toISOString() || '',
+          nextFundingTime: result.data.nextFundingTime instanceof Date
+            ? result.data.nextFundingTime.toISOString()
+            : String(result.data.nextFundingTime || ''),
           interpretation: result.data.rate > 0 ? 'Bullish' : result.data.rate < 0 ? 'Bearish' : 'Neutral',
           annualizedRate: annualized,
           source: result.data.exchange,
@@ -118,7 +121,7 @@ export function registerFundingRateTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -138,10 +141,11 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
     {
       title: 'Get Multiple Funding Rates',
       description: 'Get current funding rates for multiple perpetual futures at once. Maximum 50 symbols. Data cached for 15 minutes.',
-      inputSchema: BatchFundingRateInputSchema,
+      inputSchema: BatchFundingRateInputSchema as any,
       outputSchema: BatchPricesOutputSchema as any,
     },
-    async ({ symbols }) => {
+    (async (args: { symbols: string[] }, _extra: any) => {
+      const { symbols } = args;
       const startTime = Date.now();
 
       try {
@@ -217,7 +221,7 @@ export function registerBatchFundingRatesTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -237,10 +241,10 @@ export function registerAllFundingRatesTool(server: McpServer): void {
     {
       title: 'Get All Funding Rates',
       description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
-      inputSchema: z.object({}),
+      inputSchema: {} as any,
       outputSchema: BatchPricesOutputSchema as any,
     },
-    async () => {
+    (async (_extra: any) => {
       const startTime = Date.now();
 
       try {
@@ -294,7 +298,7 @@ export function registerAllFundingRatesTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -314,10 +318,11 @@ export function registerFundingRateStatsTool(server: McpServer): void {
     {
       title: 'Get Funding Rate Statistics',
       description: 'Get statistical analysis of historical funding rates including average, high, low, and trends. Useful for understanding funding rate behavior over time.',
-      inputSchema: FundingRateStatsInputSchema,
+      inputSchema: FundingRateStatsInputSchema as any,
       outputSchema: FundingRateStatsOutputSchema as any,
     },
-    async ({ symbol, limit }) => {
+    (async (args: { symbol: string; limit?: number }, _extra: any) => {
+      const { symbol, limit } = args;
       const startTime = Date.now();
 
       try {
@@ -356,7 +361,7 @@ export function registerFundingRateStatsTool(server: McpServer): void {
           ],
         };
       }
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -376,10 +381,10 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
     {
       title: 'List Supported Perpetuals',
       description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
-      inputSchema: z.object({}),
+      inputSchema: {} as any,
       outputSchema: ListSupportedPerpetualsOutputSchema as any,
     },
-    async () => {
+    (async (_extra: any) => {
       const symbols = getSupportedPerpetualSymbols();
 
       const structuredData = {
@@ -397,7 +402,7 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
         ],
         structuredContent: structuredData,
       };
-    }
+    }) as any
   );
 
   addToRegistry({
@@ -420,7 +425,7 @@ function formatFundingRateResponse(rate: FundingRate, cached: boolean): string {
     `${emoji} ${rate.symbol} Perpetual Funding Rate`,
     `Rate: ${ratePercent}% ${sentiment}`,
     `Exchange: ${rate.exchange}`,
-    `Next Funding: ${rate.nextFundingTime?.toLocaleString() ?? 'N/A'}`,
+    `Next Funding: ${rate.nextFundingTime instanceof Date ? rate.nextFundingTime.toLocaleString() : String(rate.nextFundingTime ?? 'N/A')}`,
   ];
 
   if (rate.predictedRate !== undefined) {
@@ -429,7 +434,7 @@ function formatFundingRateResponse(rate: FundingRate, cached: boolean): string {
   }
 
   lines.push(`Cached: ${cached ? 'Yes ⚡' : 'No (Fresh)'}`);
-  lines.push(`Updated: ${rate.timestamp.toLocaleString()}`);
+  lines.push(`Updated: ${rate.timestamp instanceof Date ? rate.timestamp.toLocaleString() : String(rate.timestamp)}`);
 
   // Add interpretation
   lines.push('');
