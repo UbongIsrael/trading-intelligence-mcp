@@ -28,6 +28,7 @@ interface YahooQuoteResponse {
         regularMarketDayHigh?: number;
         regularMarketDayLow?: number;
         marketCap?: number;
+        chartPreviousClose?: number;
       };
       timestamp: number[];
       indicators: {
@@ -113,12 +114,14 @@ export async function fetchStockPrice(symbol: string): Promise<PriceData> {
     }
 
     // Calculate 24h change if previous close is available
-    const change24h = meta.previousClose
-      ? meta.regularMarketPrice - meta.previousClose
+    const previousClose = meta.previousClose || meta.chartPreviousClose;
+
+    const change24h = previousClose
+      ? meta.regularMarketPrice - previousClose
       : undefined;
 
-    const changePercent24h = meta.previousClose && change24h !== undefined
-      ? (change24h / meta.previousClose) * 100
+    const changePercent24h = previousClose && change24h !== undefined
+      ? (change24h / previousClose) * 100
       : undefined;
 
     // Build PriceData object
