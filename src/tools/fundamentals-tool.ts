@@ -4,7 +4,6 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
 import { addToRegistry } from './registry.js';
 import { getCacheService } from '../cache/index.js';
 import {
@@ -25,57 +24,73 @@ import {
 } from '../schemas/output-schemas.js';
 
 /**
- * Input schema for company overview tool
+ * Input schema for company overview tool (JSON Schema format)
  */
-const CompanyOverviewInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(5)
-    .describe('Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)'),
-});
+const CompanyOverviewInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for financial statements tool
+ * Input schema for financial statements tool (JSON Schema format)
  */
-const FinancialStatementsInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(5)
-    .describe('Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)'),
-  period: z.enum(['annual', 'quarterly'])
-    .default('annual')
-    .describe('Report period: annual or quarterly'),
-  limit: z.number()
-    .min(1)
-    .max(10)
-    .default(4)
-    .describe('Number of periods to return (default: 4)'),
-});
+const FinancialStatementsInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)",
+    },
+    period: {
+      type: "string" as const,
+      enum: ["annual", "quarterly"],
+      description: "Report period: annual or quarterly (default: annual)",
+    },
+    limit: {
+      type: "number" as const,
+      description: "Number of periods to return (default: 4)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for earnings tool
+ * Input schema for earnings tool (JSON Schema format)
  */
-const EarningsInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(5)
-    .describe('Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)'),
-  limit: z.number()
-    .min(1)
-    .max(20)
-    .default(8)
-    .describe('Number of earnings periods to return (default: 8)'),
-});
+const EarningsInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)",
+    },
+    limit: {
+      type: "number" as const,
+      description: "Number of earnings periods to return (default: 8)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for full fundamentals tool
+ * Input schema for full fundamentals tool (JSON Schema format)
  */
-const FullFundamentalsInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(5)
-    .describe('Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)'),
-});
+const FullFundamentalsInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
  * Register the company overview tool
@@ -86,10 +101,11 @@ export function registerCompanyOverviewTool(server: McpServer): void {
     {
       title: 'Get Company Overview',
       description: 'Get company profile and key financial metrics for a stock. Includes sector, market cap, P/E ratio, EPS, 52-week range, and more. Data cached for 1 hour.',
-      inputSchema: CompanyOverviewInputSchema,
+      inputSchema: CompanyOverviewInputSchema as any,
       outputSchema: CompanyOverviewOutputSchema as any,
     },
-    async ({ symbol }) => {
+    async (args: any, _extra: any) => {
+      const { symbol } = args as { symbol: string };
       const startTime = Date.now();
 
       // Check if Alpha Vantage is configured
@@ -97,7 +113,7 @@ export function registerCompanyOverviewTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: 'Error: Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable to enable fundamentals data.',
             },
           ],
@@ -154,7 +170,7 @@ export function registerCompanyOverviewTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: formatCompanyOverviewResponse(overview, result.cached),
             },
           ],
@@ -165,7 +181,7 @@ export function registerCompanyOverviewTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: `Error fetching company overview for ${symbol}: ${error.message}`,
             },
           ],
@@ -191,17 +207,18 @@ export function registerEarningsTool(server: McpServer): void {
     {
       title: 'Get Earnings Data',
       description: 'Get quarterly earnings data including EPS estimates, actuals, and surprise percentages. Shows analyst expectations vs actual performance. Data cached for 1 hour.',
-      inputSchema: EarningsInputSchema,
+      inputSchema: EarningsInputSchema as any,
       outputSchema: EarningsOutputSchema as any,
     },
-    async ({ symbol, limit }) => {
+    async (args: any, _extra: any) => {
+      const { symbol, limit } = args as { symbol: string; limit?: number };
       const startTime = Date.now();
 
       if (!isAlphaVantageConfigured()) {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: 'Error: Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable to enable fundamentals data.',
             },
           ],
@@ -247,7 +264,7 @@ export function registerEarningsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: formatEarningsResponse(symbol.toUpperCase(), earnings, result.cached),
             },
           ],
@@ -258,7 +275,7 @@ export function registerEarningsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: `Error fetching earnings for ${symbol}: ${error.message}`,
             },
           ],
@@ -284,17 +301,18 @@ export function registerFinancialStatementsTool(server: McpServer): void {
     {
       title: 'Get Financial Statements',
       description: 'Get company financial statements including balance sheet, income statement, and cash flow data. Available for annual or quarterly periods. Data cached for 1 hour.',
-      inputSchema: FinancialStatementsInputSchema,
+      inputSchema: FinancialStatementsInputSchema as any,
       outputSchema: FinancialStatementsOutputSchema as any,
     },
-    async ({ symbol, period, limit }) => {
+    async (args: any, _extra: any) => {
+      const { symbol, period, limit } = args as { symbol: string; period?: string; limit?: number };
       const startTime = Date.now();
 
       if (!isAlphaVantageConfigured()) {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: 'Error: Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable to enable fundamentals data.',
             },
           ],
@@ -303,7 +321,7 @@ export function registerFinancialStatementsTool(server: McpServer): void {
 
       try {
         const cacheService = getCacheService();
-        const effectivePeriod = period || 'annual';
+        const effectivePeriod = (period || 'annual') as 'annual' | 'quarterly';
         const effectiveLimit = limit || 4;
 
         const result = await cacheService.fundamentals.getOrFetch(
@@ -356,7 +374,7 @@ export function registerFinancialStatementsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: formatFinancialStatementsResponse(symbol.toUpperCase(), statements, effectivePeriod, result.cached),
             },
           ],
@@ -367,7 +385,7 @@ export function registerFinancialStatementsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: `Error fetching financial statements for ${symbol}: ${error.message}`,
             },
           ],
@@ -393,17 +411,18 @@ export function registerFullFundamentalsTool(server: McpServer): void {
     {
       title: 'Get Full Fundamentals',
       description: 'Get comprehensive fundamental data for a stock including company overview, earnings history, and key financial ratios. Best for complete fundamental analysis. Data cached for 1 hour.',
-      inputSchema: FullFundamentalsInputSchema,
+      inputSchema: FullFundamentalsInputSchema as any,
       outputSchema: FullFundamentalsOutputSchema as any,
     },
-    async ({ symbol }) => {
+    async (args: any, _extra: any) => {
+      const { symbol } = args as { symbol: string };
       const startTime = Date.now();
 
       if (!isAlphaVantageConfigured()) {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: 'Error: Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable to enable fundamentals data.',
             },
           ],
@@ -481,7 +500,7 @@ export function registerFullFundamentalsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: formatFullFundamentalsResponse(fullData, result.cached),
             },
           ],
@@ -492,7 +511,7 @@ export function registerFullFundamentalsTool(server: McpServer): void {
         return {
           content: [
             {
-              type: 'text',
+              type: 'text' as const,
               text: `Error fetching full fundamentals for ${symbol}: ${error.message}`,
             },
           ],

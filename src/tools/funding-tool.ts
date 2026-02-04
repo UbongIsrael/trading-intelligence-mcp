@@ -4,7 +4,6 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { FundingRate } from '../types.js';
 import { getCacheService } from '../cache/index.js';
@@ -24,37 +23,51 @@ import {
 } from '../schemas/output-schemas.js';
 
 /**
- * Input schema for funding rate tool
+ * Input schema for funding rate tool (JSON Schema format)
  */
-const FundingRateInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .describe('Crypto symbol (e.g., BTC, ETH, SOL)'),
-});
+const FundingRateInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Crypto symbol (e.g., BTC, ETH, SOL)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for batch funding rates
+ * Input schema for batch funding rates (JSON Schema format)
  */
-const BatchFundingRateInputSchema = z.object({
-  symbols: z.array(z.string())
-    .min(1)
-    .max(50)
-    .describe('Array of crypto symbols (max 50)'),
-});
+const BatchFundingRateInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbols: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      description: "Array of crypto symbols (max 50)",
+    },
+  },
+  required: ["symbols"],
+};
 
 /**
- * Input schema for funding rate statistics
+ * Input schema for funding rate statistics (JSON Schema format)
  */
-const FundingRateStatsInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .describe('Crypto symbol (e.g., BTC, ETH, SOL)'),
-  limit: z.number()
-    .min(1)
-    .max(1000)
-    .optional()
-    .describe('Number of historical rates to analyze (default: 100)'),
-});
+const FundingRateStatsInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Crypto symbol (e.g., BTC, ETH, SOL)",
+    },
+    limit: {
+      type: "number" as const,
+      description: "Number of historical rates to analyze (default: 100)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
  * Register the funding rate tool
@@ -259,7 +272,7 @@ export function registerAllFundingRatesTool(server: McpServer): void {
     {
       title: 'Get All Funding Rates',
       description: 'Get current funding rates for all available perpetual futures on Binance. Returns 200+ symbols. Use for market-wide analysis. Data cached for 15 minutes.',
-      inputSchema: z.object({}) as any,
+      inputSchema: { type: "object" as const, properties: {} } as any,
       outputSchema: BatchPricesOutputSchema as any,
     },
     (async (_args: Record<string, never>, _extra: any) => {
@@ -416,7 +429,7 @@ export function registerSupportedPerpetualsTool(server: McpServer): void {
     {
       title: 'List Supported Perpetuals',
       description: 'Get a list of all supported perpetual futures symbols for funding rate queries.',
-      inputSchema: z.object({}) as any,
+      inputSchema: { type: "object" as const, properties: {} } as any,
       outputSchema: ListSupportedPerpetualsOutputSchema as any,
     },
     (async (_args: Record<string, never>, _extra: any) => {

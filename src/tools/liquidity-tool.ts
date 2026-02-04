@@ -4,7 +4,6 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { TechnicalAnalysis } from '../types.js';
 import { getCacheService } from '../cache/index.js';
@@ -22,52 +21,69 @@ import {
 } from '../schemas/output-schemas.js';
 
 /**
- * Input schema for liquidity zones tool
+ * Input schema for liquidity zones tool (JSON Schema format)
  */
-const LiquidityZonesInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(10)
-    .describe('Trading symbol (e.g., AAPL, TSLA, BTC, ETH)'),
-  timeframe: z.enum(['1h', '4h', '1d', '1w'])
-    .optional()
-    .describe('Analysis timeframe (default: 1d). Options: 1h, 4h, 1d, 1w'),
-  lookbackDays: z.number()
-    .min(7)
-    .max(365)
-    .optional()
-    .describe('Number of days to analyze (default: based on timeframe, max: 365)'),
-});
+const LiquidityZonesInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Trading symbol (e.g., AAPL, TSLA, BTC, ETH)",
+    },
+    timeframe: {
+      type: "string" as const,
+      enum: ["1h", "4h", "1d", "1w"],
+      description: "Analysis timeframe (default: 1d). Options: 1h, 4h, 1d, 1w",
+    },
+    lookbackDays: {
+      type: "number" as const,
+      description: "Number of days to analyze (default: based on timeframe, max: 365)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for support/resistance tool
+ * Input schema for support/resistance tool (JSON Schema format)
  */
-const SupportResistanceInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(10)
-    .describe('Trading symbol (e.g., AAPL, TSLA, BTC, ETH)'),
-  timeframe: z.enum(['1h', '4h', '1d', '1w'])
-    .optional()
-    .describe('Analysis timeframe (default: 1d)'),
-});
+const SupportResistanceInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Trading symbol (e.g., AAPL, TSLA, BTC, ETH)",
+    },
+    timeframe: {
+      type: "string" as const,
+      enum: ["1h", "4h", "1d", "1w"],
+      description: "Analysis timeframe (default: 1d)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for price level analysis
+ * Input schema for price level analysis (JSON Schema format)
  */
-const PriceLevelAnalysisInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .max(10)
-    .describe('Trading symbol (e.g., AAPL, TSLA, BTC, ETH)'),
-  currentPrice: z.number()
-    .positive()
-    .optional()
-    .describe('Current price for distance calculations (fetched if not provided)'),
-  timeframe: z.enum(['1h', '4h', '1d', '1w'])
-    .optional()
-    .describe('Analysis timeframe (default: 1d)'),
-});
+const PriceLevelAnalysisInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Trading symbol (e.g., AAPL, TSLA, BTC, ETH)",
+    },
+    currentPrice: {
+      type: "number" as const,
+      description: "Current price for distance calculations (fetched if not provided)",
+    },
+    timeframe: {
+      type: "string" as const,
+      enum: ["1h", "4h", "1d", "1w"],
+      description: "Analysis timeframe (default: 1d)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
  * Register the liquidity zones tool
@@ -668,15 +684,21 @@ function capitalizeFirst(str: string): string {
  * This is a leaner alternative that bypasses the full zone analysis
  */
 export function registerQuickSupportResistanceTool(server: McpServer): void {
-  const QuickSRInputSchema = z.object({
-    symbol: z.string()
-      .min(1)
-      .max(10)
-      .describe('Trading symbol (e.g., AAPL, TSLA, BTC)'),
-    timeframe: z.enum(['1h', '4h', '1d', '1w'])
-      .optional()
-      .describe('Analysis timeframe (default: 1d). Use get_available_timeframes to see options.'),
-  });
+  const QuickSRInputSchema = {
+    type: "object" as const,
+    properties: {
+      symbol: {
+        type: "string" as const,
+        description: "Trading symbol (e.g., AAPL, TSLA, BTC)",
+      },
+      timeframe: {
+        type: "string" as const,
+        enum: ["1h", "4h", "1d", "1w"],
+        description: "Analysis timeframe (default: 1d). Use get_available_timeframes to see options.",
+      },
+    },
+    required: ["symbol"],
+  };
 
   server.registerTool(
     'quick_support_resistance',
@@ -803,7 +825,7 @@ export function registerAvailableTimeframesTool(server: McpServer): void {
     {
       title: 'Get Available Timeframes',
       description: 'Get the list of available timeframes for liquidity zone analysis.',
-      inputSchema: z.object({}) as any,
+      inputSchema: { type: "object" as const, properties: {} } as any,
       outputSchema: AvailableTimeframesOutputSchema as any,
     },
     (async (_args: Record<string, never>, _extra: any) => {

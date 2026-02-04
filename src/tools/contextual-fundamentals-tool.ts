@@ -1,6 +1,5 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { getCacheService } from '../cache/index.js';
 import {
@@ -29,22 +28,26 @@ import {
 import { ContextualFundamentalsOutputSchema } from '../schemas/output-schemas.js';
 
 /**
- * Input schema for contextual fundamentals tool
+ * Input schema for contextual fundamentals tool (JSON Schema format)
  */
-const ContextualFundamentalsInputSchema = z.object({
-    symbol: z.string()
-        .min(1)
-        .max(5)
-        .describe('Stock ticker symbol (e.g., AAPL, NVDA)'),
-    includeInsider: z.boolean()
-        .optional()
-        .default(true)
-        .describe('Include insider trading analysis (default: true)'),
-    includeEvents: z.boolean()
-        .optional()
-        .default(true)
-        .describe('Include material events from 8-K (default: true)'),
-});
+const ContextualFundamentalsInputSchema = {
+    type: "object" as const,
+    properties: {
+        symbol: {
+            type: "string" as const,
+            description: "Stock ticker symbol (e.g., AAPL, NVDA)",
+        },
+        includeInsider: {
+            type: "boolean" as const,
+            description: "Include insider trading analysis (default: true)",
+        },
+        includeEvents: {
+            type: "boolean" as const,
+            description: "Include material events from 8-K (default: true)",
+        },
+    },
+    required: ["symbol"],
+};
 
 /**
  * Register the contextual fundamentals tool

@@ -4,36 +4,49 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { addToRegistry } from './registry.js';
 import { getPrice, getMultiplePrices, invalidatePrice } from '../services/prices.js';
 import { PriceData } from '../types.js';
 import { PriceOutputSchema, BatchPricesOutputSchema, CacheInvalidationOutputSchema } from '../schemas/output-schemas.js';
 
 /**
- * Input schema for price tool
+ * Input schema for price tool (JSON Schema format)
  */
-const PriceInputSchema = z.object({
-  symbol: z.string()
-    .min(1)
-    .describe('Asset symbol (e.g., AAPL, BTC, ETH)'),
-  assetType: z.enum(['stock', 'crypto'])
-    .optional()
-    .describe('Asset type (optional, auto-detected if not provided)'),
-});
+const PriceInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbol: {
+      type: "string" as const,
+      description: "Asset symbol (e.g., AAPL, BTC, ETH)",
+    },
+    assetType: {
+      type: "string" as const,
+      enum: ["stock", "crypto"],
+      description: "Asset type (optional, auto-detected if not provided)",
+    },
+  },
+  required: ["symbol"],
+};
 
 /**
- * Input schema for batch price tool
+ * Input schema for batch price tool (JSON Schema format)
  */
-const BatchPriceInputSchema = z.object({
-  symbols: z.array(z.string())
-    .min(1)
-    .max(50)
-    .describe('Array of asset symbols (max 50)'),
-  assetType: z.enum(['stock', 'crypto'])
-    .optional()
-    .describe('Asset type for all symbols (optional, auto-detected if not provided)'),
-});
+const BatchPriceInputSchema = {
+  type: "object" as const,
+  properties: {
+    symbols: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      description: "Array of asset symbols (max 50)",
+    },
+    assetType: {
+      type: "string" as const,
+      enum: ["stock", "crypto"],
+      description: "Asset type for all symbols (optional, auto-detected if not provided)",
+    },
+  },
+  required: ["symbols"],
+};
 
 /**
  * Register the price tool
@@ -44,8 +57,8 @@ export function registerPriceTool(server: McpServer): void {
     {
       title: 'Get Asset Price',
       description: 'Get current price data for a stock or cryptocurrency. Supports stocks (e.g., AAPL, TSLA) and crypto (e.g., BTC, ETH). Data is cached for 5 minutes.',
-      inputSchema: PriceInputSchema as any, // Context Protocol requirement
-      outputSchema: PriceOutputSchema as any, // Context Protocol requirement
+      inputSchema: PriceInputSchema as any,
+      outputSchema: PriceOutputSchema as any,
     },
     (async (args: { symbol: string; assetType?: 'stock' | 'crypto' }, _extra: any) => {
       const { symbol, assetType } = args;
@@ -217,8 +230,17 @@ export function registerInvalidatePriceTool(server: McpServer): void {
     {
       title: 'Invalidate Price Cache',
       description: 'Clear cached price data for a specific symbol to force a fresh fetch',
-      inputSchema: { symbol: z.string().min(1).describe('Asset symbol to invalidate') } as any,
-      outputSchema: CacheInvalidationOutputSchema as any, // Context Protocol requirement
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          symbol: {
+            type: "string" as const,
+            description: "Asset symbol to invalidate",
+          },
+        },
+        required: ["symbol"],
+      } as any,
+      outputSchema: CacheInvalidationOutputSchema as any,
     },
     (async (args: { symbol: string }, _extra: any) => {
       const { symbol } = args;
