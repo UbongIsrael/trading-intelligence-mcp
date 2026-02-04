@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
+
 import { registerHealthCheckTool } from './health.js';
 import { registerPriceTool, registerBatchPriceTool, registerInvalidatePriceTool } from './price-tool.js';
 import {
@@ -111,36 +111,4 @@ export async function registerTools(server: McpServer): Promise<void> {
   }
 }
 
-/**
- * Example tool registration helper
- * This demonstrates the pattern for registering tools
- */
-export function registerExampleTool(server: McpServer): void {
-  server.registerTool(
-    'example_tool',
-    {
-      title: 'Example Tool',
-      description: 'An example tool demonstrating the registration pattern',
-      inputSchema: {
-        text: z.string().describe('Example text input'),
-      },
-    },
-    async ({ text }) => {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Echo: ${text}`,
-          },
-        ],
-      };
-    }
-  );
 
-  addToRegistry({
-    name: 'example_tool',
-    description: 'Example tool for demonstration',
-    category: 'system',
-    version: '0.1.0',
-  });
-}

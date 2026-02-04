@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as z from 'zod/v4';
+
 import { addToRegistry, getRegisteredTools } from './registry.js';
 import { config } from '../config.js';
 import { getCacheService } from '../cache/index.js';
@@ -20,13 +20,18 @@ export function registerHealthCheckTool(server: McpServer): void {
       title: 'Health Check',
       description: 'Get server health status and system diagnostics',
       inputSchema: {
-        detailed: z.boolean()
-          .optional()
-          .describe('Include detailed diagnostic information'),
-      },
+        type: "object" as const,
+        properties: {
+          detailed: {
+            type: "boolean" as const,
+            description: "Include detailed diagnostic information",
+          },
+        },
+      } as any,
       outputSchema: HealthCheckOutputSchema as any,
     },
-    async ({ detailed = false }) => {
+    async (args: any) => {
+      const { detailed = false } = args as { detailed?: boolean };
       const toolCount = getRegisteredTools().length;
       const healthData = await getHealthData(detailed, toolCount);
 
@@ -53,7 +58,7 @@ export function registerHealthCheckTool(server: McpServer): void {
       return {
         content: [
           {
-            type: 'text',
+            type: 'text' as const,
             text: JSON.stringify(healthData, null, 2),
           },
         ],
