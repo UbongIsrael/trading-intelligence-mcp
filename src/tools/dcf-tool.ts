@@ -25,7 +25,7 @@ const DCFInputSchema = z.object({
 // ─────────────────────────────────────────────────────────
 
 function formatDCFOutput(result: DCFResult): string {
-    const { metadata, currentMarketData, growthAnalysis, waccCalculation, cashFlowProjections, terminalValue, valuationSummary, investmentRecommendation, sensitivityAnalysis, riskFactors, dataQuality, historicalData } = result;
+    const { metadata, currentMarketData, growthAnalysis, waccCalculation, cashFlowProjections, terminalValue, valuationSummary, investmentRecommendation, sensitivityAnalysis, riskFactors, dataQuality, historicalData, capexAnalysis, reverseDCF, sanityCheck } = result;
 
     const fmtNum = (n: number | null | undefined, decimals = 2): string => {
         if (n === null || n === undefined) return 'N/A';
@@ -44,10 +44,21 @@ function formatDCFOutput(result: DCFResult): string {
 
     // ── Header ──────────────────────────────
     output += `\n${'═'.repeat(70)}\n`;
-    output += `  📊 DCF ANALYSIS: ${metadata.companyName} (${metadata.ticker})\n`;
+    output += `  📊 DCF ANALYSIS v2: ${metadata.companyName} (${metadata.ticker})\n`;
     output += `${'═'.repeat(70)}\n`;
     output += `  Date: ${metadata.analysisDate} | Method: ${metadata.dcfMethod === 'fcf_based' ? 'Free Cash Flow' : 'Earnings-Based'}\n`;
     output += `  Data Source: ${metadata.dataSource}\n`;
+
+    // ── Sanity Check Alert ──────────────────
+    if (sanityCheck.anomalyDetected) {
+        output += `\n  ⚠️  SANITY CHECK WARNING ⚠️\n`;
+        for (const flag of sanityCheck.flags) {
+            output += `  🚨 ${flag}\n`;
+        }
+        if (sanityCheck.driverAnalysis) {
+            output += `  📋 Driver: ${sanityCheck.driverAnalysis}\n`;
+        }
+    }
 
     // ── Current Market Data ─────────────────
     output += `\n${'─'.repeat(70)}\n`;
@@ -59,29 +70,46 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  Beta:                ${currentMarketData.beta.toFixed(2)}\n`;
     output += `  Shares Outstanding:  ${(currentMarketData.sharesOutstanding / 1e9).toFixed(2)}B\n`;
 
-    // ── Historical Financial Data ──────────
+    // ── Historical Data + Capex Decomposition ──
     output += `\n${'─'.repeat(70)}\n`;
     output += `  📋 HISTORICAL DATA (${historicalData.yearsAnalyzed} years)\n`;
     output += `${'─'.repeat(70)}\n`;
     for (const d of historicalData.annualData.slice(0, 5)) {
-        output += `  ${d.year}: Revenue ${fmtNum(d.revenue)} | `;
-        if (d.freeCashFlow !== undefined) output += `FCF ${fmtNum(d.freeCashFlow)} | `;
-        if (d.eps !== undefined) output += `EPS $${d.eps.toFixed(2)} | `;
-        if (d.capex !== undefined) output += `CapEx ${fmtNum(d.capex)}`;
+        output += `  ${d.year}: Rev ${fmtNum(d.revenue)}`;
+        if (d.freeCashFlow !== undefined) output += ` | FCF ${fmtNum(d.freeCashFlow)}`;
+        if (d.normalizedFCF !== undefined) output += ` | NormFCF ${fmtNum(d.normalizedFCF)}`;
+        if (d.eps !== undefined) output += ` | EPS $${d.eps.toFixed(2)}`;
         output += '\n';
+        if (d.maintenanceCapex !== undefined || d.growthCapex !== undefined) {
+            output += `         D&A: ${fmtNum(d.depreciationAndAmortization)} | Maint.Capex: ${fmtNum(d.maintenanceCapex)} | Growth Capex: ${fmtNum(d.growthCapex)}\n`;
+        }
     }
 
-    // ── Growth Analysis ─────────────────────
+    // ── Capex Analysis ──────────────────────
+    output += `\n  🏗️  CAPEX PROFILE: ${capexAnalysis.isInvestmentCycle ? '⚡ INVESTMENT CYCLE DETECTED' : '✅ Normal'}\n`;
+    output += `  Growth Capex %: ${(capexAnalysis.avgGrowthCapexPct * 100).toFixed(0)}% of total\n`;
+    output += `  ${capexAnalysis.interpretation}\n`;
+
+    // ── Growth Analysis (Multi-Signal) ──────
     output += `\n${'─'.repeat(70)}\n`;
-    output += `  📈 GROWTH ANALYSIS\n`;
+    output += `  📈 GROWTH ANALYSIS (Multi-Signal Composite)\n`;
     output += `${'─'.repeat(70)}\n`;
-    output += `  Historical CAGRs:\n`;
-    output += `    3-Year FCF/Earnings:  ${fmtPct(growthAnalysis.historicalGrowthRates.fcfCagr3yr)}\n`;
-    output += `    5-Year FCF/Earnings:  ${fmtPct(growthAnalysis.historicalGrowthRates.fcfCagr5yr)}\n`;
-    output += `    3-Year Revenue:       ${fmtPct(growthAnalysis.historicalGrowthRates.revenueCagr3yr)}\n`;
-    output += `    3-Year Earnings:      ${fmtPct(growthAnalysis.historicalGrowthRates.earningsCagr3yr)}\n`;
-    output += `    Growth Trend:         ${growthAnalysis.historicalGrowthRates.growthTrend}\n\n`;
-    output += `  Projection Assumptions:\n`;
+    output += `  Individual Growth Signals:\n`;
+    output += `    Revenue CAGR (3yr):        ${fmtPct(growthAnalysis.historicalGrowthRates.revenueCagr3yr)}\n`;
+    output += `    OpIncome CAGR (3yr):       ${fmtPct(growthAnalysis.historicalGrowthRates.opIncomeCagr3yr)}\n`;
+    output += `    Normalized FCF CAGR (3yr): ${fmtPct(growthAnalysis.historicalGrowthRates.normalizedFcfCagr3yr)}\n`;
+    output += `    Owner Earnings CAGR (3yr): ${fmtPct(growthAnalysis.historicalGrowthRates.ownerEarningsCagr3yr)}\n`;
+    output += `    Raw FCF CAGR (3yr):        ${fmtPct(growthAnalysis.historicalGrowthRates.rawFcfCagr3yr)} ${growthAnalysis.compositeGrowth.capexAdjusted ? '⚠️ capex-distorted' : ''}\n`;
+    output += `    Trend:                     ${growthAnalysis.historicalGrowthRates.growthTrend}\n\n`;
+
+    output += `  Composite Growth Rate: ${fmtPct(growthAnalysis.compositeGrowth.rate)}${growthAnalysis.compositeGrowth.capexAdjusted ? ' (capex-adjusted weights)' : ''}\n`;
+    output += `  Signal Weights:\n`;
+    for (const s of growthAnalysis.compositeGrowth.signalBreakdown) {
+        const val = s.value !== null ? fmtPct(s.value) : 'N/A (excluded)';
+        output += `    ${s.signal}: ${val} × ${(s.weight * 100).toFixed(0)}% = ${fmtPct(s.contribution)}\n`;
+    }
+
+    output += `\n  Projection Assumptions:\n`;
     output += `    Phase 1 (${growthAnalysis.projectionAssumptions.phase1.years}): ${fmtPct(growthAnalysis.projectionAssumptions.phase1.growthRate)}\n`;
     output += `      ↳ ${growthAnalysis.projectionAssumptions.phase1.rationale}\n`;
     output += `    Phase 2 (${growthAnalysis.projectionAssumptions.phase2.years}): ${fmtPct(growthAnalysis.projectionAssumptions.phase2.growthRate)}\n`;
@@ -144,6 +172,15 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  │  UPSIDE/DOWNSIDE:  ${valuationSummary.upsideDownsideFormatted}                      │\n`;
     output += `  │  VALUATION:        ${valuationSummary.valuation}                        │\n`;
     output += `  └─────────────────────────────────────────────────┘\n`;
+
+    // ── Reverse DCF ─────────────────────────
+    output += `\n${'─'.repeat(70)}\n`;
+    output += `  🔄 REVERSE DCF\n`;
+    output += `${'─'.repeat(70)}\n`;
+    output += `  Market-Implied Growth Rate: ${reverseDCF.impliedGrowthFormatted}\n`;
+    output += `  Our Model Growth Rate:      ${fmtPct(reverseDCF.modelGrowthRate)}\n`;
+    output += `  Gap:                        ${reverseDCF.gapPercent >= 0 ? '+' : ''}${(reverseDCF.gapPercent * 100).toFixed(0)}%\n`;
+    output += `  📋 ${reverseDCF.interpretation}\n`;
 
     // ── Recommendation ──────────────────────
     output += `\n${'─'.repeat(70)}\n`;

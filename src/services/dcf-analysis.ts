@@ -1,12 +1,16 @@
 /**
- * DCF (Discounted Cash Flow) Analysis Service
+ * DCF (Discounted Cash Flow) Analysis Service — v2
  * 
- * Complete DCF valuation engine using Alpha Vantage API data.
- * Supports both FCF-based and Earnings-based DCF approaches.
- * All projections derived from historical data — no external analyst inputs.
+ * Structural refactoring addressing:
+ *   1. Multi-signal composite growth engine (rev, OpInc, normFCF, ownerEarnings)
+ *   2. Capex decomposition (maintenance vs growth)
+ *   3. EV/FCF exit multiple for FCF-based DCF (not P/E)
+ *   4. Consistent sensitivity analysis (shared computeIntrinsicValue path)
+ *   5. Sanity gate + reverse DCF guardrails
  * 
  * Pipeline: Data Collection → Growth Analysis → WACC → Projections →
- *           Terminal Value → Discounting → Intrinsic Value → Sensitivity
+ *           Terminal Value → Discounting → Intrinsic Value →
+ *           Sanity Check → Reverse DCF → Sensitivity → Output
  */
 
 import {
@@ -23,17 +27,30 @@ import { APIError } from '../types.js';
 // Constants & Defaults
 // ─────────────────────────────────────────────────────────
 
-const MARKET_RISK_PREMIUM = 0.06;       // Historical S&P 500 premium over risk-free
-const TERMINAL_GROWTH_RATE = 0.025;     // ~US GDP growth
-const DEFAULT_EXIT_PE = 20;             // Conservative P/E for exit multiple
+const MARKET_RISK_PREMIUM = 0.06;
+const TERMINAL_GROWTH_RATE = 0.025;
+const DEFAULT_EXIT_EV_FCF = 20;
+const DEFAULT_EXIT_PE = 20;
 const PROJECTION_YEARS = 10;
 const PHASE_1_YEARS = 5;
-const MAX_GROWTH_CAP = 0.50;            // 50% max growth per year
-const MIN_LONG_TERM_GROWTH = 0.03;      // 3% floor for long-term
-const MAX_LONG_TERM_GROWTH = 0.20;      // 20% ceiling for long-term
-const SENSITIVITY_WACC_DELTA = 0.02;    // ±2% WACC sensitivity
+const MAX_GROWTH_CAP = 0.50;
+const MIN_LONG_TERM_GROWTH = 0.03;
+const MAX_LONG_TERM_GROWTH = 0.20;
+const SENSITIVITY_WACC_DELTA = 0.02;
 const DEFAULT_BETA = 1.0;
-const DEFAULT_TAX_RATE = 0.21;          // US corporate tax rate
+const DEFAULT_TAX_RATE = 0.21;
+
+// Sanity gate thresholds
+const SANITY_LOW_RATIO = 0.40;   // Flag if intrinsic < 40% of market price
+const SANITY_HIGH_RATIO = 3.0;   // Flag if intrinsic > 300% of market price
+
+// Composite growth weights
+const GROWTH_WEIGHTS = {
+    revenue: 0.30,
+    operatingIncome: 0.25,
+    normalizedFCF: 0.25,
+    ownerEarnings: 0.20,
+};
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -61,17 +78,33 @@ export interface DCFResult {
             revenue?: number;
             eps?: number;
             freeCashFlow?: number;
+            normalizedFCF?: number;
+            ownerEarnings?: number;
             operatingCashFlow?: number;
             capex?: number;
+            depreciationAndAmortization?: number;
+            maintenanceCapex?: number;
+            growthCapex?: number;
         }>;
+    };
+    capexAnalysis: {
+        isInvestmentCycle: boolean;
+        avgGrowthCapexPct: number;
+        interpretation: string;
     };
     growthAnalysis: {
         historicalGrowthRates: {
-            fcfCagr3yr: number | null;
-            fcfCagr5yr: number | null;
             revenueCagr3yr: number | null;
-            earningsCagr3yr: number | null;
+            opIncomeCagr3yr: number | null;
+            normalizedFcfCagr3yr: number | null;
+            ownerEarningsCagr3yr: number | null;
+            rawFcfCagr3yr: number | null;
             growthTrend: string;
+        };
+        compositeGrowth: {
+            rate: number;
+            signalBreakdown: Array<{ signal: string; weight: number; value: number | null; contribution: number }>;
+            capexAdjusted: boolean;
         };
         projectionAssumptions: {
             phase1: { years: string; growthRate: number; rationale: string };
@@ -124,6 +157,19 @@ export interface DCFResult {
         upsideDownsideFormatted: string;
         valuation: string;
     };
+    reverseDCF: {
+        impliedGrowthRate: number;
+        impliedGrowthFormatted: string;
+        modelGrowthRate: number;
+        gapPercent: number;
+        interpretation: string;
+    };
+    sanityCheck: {
+        anomalyDetected: boolean;
+        intrinsicVsMarketRatio: number;
+        flags: string[];
+        driverAnalysis: string;
+    };
     investmentRecommendation: {
         recommendation: string;
         confidence: string;
@@ -152,76 +198,186 @@ export interface DCFResult {
         projectionPeriod: number;
         discountRateSource: string;
         growthRateSource: string;
+        growthWeights: typeof GROWTH_WEIGHTS;
     };
 }
 
 // ─────────────────────────────────────────────────────────
-// Core calculation functions
+// Core Calculation Functions
 // ─────────────────────────────────────────────────────────
 
-/**
- * Calculate Compound Annual Growth Rate
- */
 function calculateCAGR(beginningValue: number, endingValue: number, years: number): number | null {
     if (beginningValue <= 0 || endingValue <= 0 || years <= 0) return null;
     return Math.pow(endingValue / beginningValue, 1 / years) - 1;
 }
 
-/**
- * Determine two-stage growth rates from historical data
- */
-function determineGrowthRates(
-    cagr3yr: number | null,
-    cagr5yr: number | null,
-): { phase1: number; phase2: number; trend: string; rationale1: string; rationale2: string } {
-    const base3 = cagr3yr ?? 0.10;
-    const base5 = cagr5yr ?? base3;
+/** Calculate Normalized FCF: Operating Cash Flow minus maintenance capex (D&A proxy) */
+function calculateNormalizedFCF(operatingCashFlow: number, depreciationAndAmortization: number): number {
+    return operatingCashFlow - depreciationAndAmortization;
+}
 
-    const trend = base3 > base5 ? 'accelerating' : 'decelerating';
+/** Calculate Owner Earnings (Buffett): Net Income + D&A - Maintenance Capex (D&A) ≈ Net Income */
+function calculateOwnerEarnings(netIncome: number, da: number): number {
+    // Owner Earnings = Net Income + D&A - Maintenance Capex
+    // Since Maintenance Capex ≈ D&A, this simplifies, but we keep D&A explicit
+    // to show the components. Owner Earnings ≈ NetIncome when maintenance=D&A.
+    // However, a more useful formulation: NI + D&A - maintenanceCapex
+    // where maintenanceCapex = D&A, so it's NI. But for transparency, compute explicitly:
+    const maintenanceCapex = da;
+    return netIncome + da - maintenanceCapex;
+}
 
-    let nearTerm: number;
-    if (trend === 'accelerating') {
-        nearTerm = Math.max(base3, base3 * 0.7 + base5 * 0.3);
-    } else {
-        nearTerm = base3 * 0.6 + base5 * 0.4;
+/** Detect capex anomaly: FCF declining while revenue is growing */
+function detectCapexAnomaly(
+    statements: FinancialStatement[],
+): { isAnomaly: boolean; avgGrowthCapexPct: number; interpretation: string } {
+    if (statements.length < 2) return { isAnomaly: false, avgGrowthCapexPct: 0, interpretation: 'Insufficient data' };
+
+    const sorted = [...statements].sort((a, b) => a.fiscalYear - b.fiscalYear);
+
+    // Check revenue growth vs FCF growth
+    const recentRevGrowth = sorted.length >= 2
+        ? ((sorted[sorted.length - 1].revenue ?? 0) / (sorted[sorted.length - 2].revenue ?? 1)) - 1
+        : 0;
+
+    const recentFCFGrowth = sorted.length >= 2 && sorted[sorted.length - 2].freeCashFlow && sorted[sorted.length - 2].freeCashFlow! > 0
+        ? ((sorted[sorted.length - 1].freeCashFlow ?? 0) / sorted[sorted.length - 2].freeCashFlow!) - 1
+        : 0;
+
+    // Growth capex decomposition
+    const growthCapexPcts: number[] = [];
+    for (const stmt of sorted) {
+        const totalCapex = Math.abs(stmt.capitalExpenditures ?? 0);
+        const maintenanceCapex = stmt.depreciationAndAmortization ?? 0;
+        if (totalCapex > 0) {
+            const growthCapex = Math.max(0, totalCapex - maintenanceCapex);
+            growthCapexPcts.push(growthCapex / totalCapex);
+        }
     }
 
-    // Apply caps
-    nearTerm = Math.min(nearTerm, MAX_GROWTH_CAP);
-    nearTerm = Math.max(nearTerm, 0.02); // minimum 2% growth
+    const avgGrowthCapexPct = growthCapexPcts.length > 0
+        ? growthCapexPcts.reduce((a, b) => a + b, 0) / growthCapexPcts.length
+        : 0;
 
-    let longTerm = nearTerm * 0.65;
-    longTerm = Math.max(longTerm, MIN_LONG_TERM_GROWTH);
-    longTerm = Math.min(longTerm, MAX_LONG_TERM_GROWTH);
+    const isAnomaly = recentRevGrowth > 0.10 && recentFCFGrowth < 0;
+
+    let interpretation = '';
+    if (isAnomaly) {
+        interpretation = `Revenue grew ${(recentRevGrowth * 100).toFixed(1)}% but FCF declined ${(recentFCFGrowth * 100).toFixed(1)}% — ` +
+            `likely due to elevated growth capex (${(avgGrowthCapexPct * 100).toFixed(0)}% of total capex is growth investment). ` +
+            `Growth weights adjusted to favor revenue and operating income signals.`;
+    } else if (avgGrowthCapexPct > 0.40) {
+        interpretation = `Significant growth capex (${(avgGrowthCapexPct * 100).toFixed(0)}% of total) indicates active investment cycle. ` +
+            `Using normalized FCF (OCF − D&A) to smooth capex distortion.`;
+    } else {
+        interpretation = `Capex profile is normal — growth capex is ${(avgGrowthCapexPct * 100).toFixed(0)}% of total. ` +
+            `Standard FCF-based approach is appropriate.`;
+    }
+
+    return { isAnomaly, avgGrowthCapexPct, interpretation };
+}
+
+/**
+ * Compute composite growth rate from multiple signals
+ */
+function computeCompositeGrowth(
+    revCagr: number | null,
+    opIncomeCagr: number | null,
+    normalizedFcfCagr: number | null,
+    ownerEarningsCagr: number | null,
+    capexAnomaly: boolean,
+): {
+    rate: number;
+    breakdown: Array<{ signal: string; weight: number; value: number | null; contribution: number }>;
+    capexAdjusted: boolean;
+} {
+    let weights = { ...GROWTH_WEIGHTS };
+
+    // During capex anomaly: boost revenue/OpIncome, reduce FCF weight
+    if (capexAnomaly) {
+        weights = {
+            revenue: 0.40,
+            operatingIncome: 0.30,
+            normalizedFCF: 0.15,
+            ownerEarnings: 0.15,
+        };
+    }
+
+    const signals: Array<{ signal: string; weight: number; value: number | null }> = [
+        { signal: 'Revenue CAGR (3yr)', weight: weights.revenue, value: revCagr },
+        { signal: 'Operating Income CAGR (3yr)', weight: weights.operatingIncome, value: opIncomeCagr },
+        { signal: 'Normalized FCF CAGR (3yr)', weight: weights.normalizedFCF, value: normalizedFcfCagr },
+        { signal: 'Owner Earnings CAGR (3yr)', weight: weights.ownerEarnings, value: ownerEarningsCagr },
+    ];
+
+    // Compute weighted average, redistributing weight of null signals
+    const available = signals.filter(s => s.value !== null);
+    if (available.length === 0) {
+        return {
+            rate: 0.10, // Fallback: assume 10%
+            breakdown: signals.map(s => ({ ...s, contribution: 0 })),
+            capexAdjusted: capexAnomaly,
+        };
+    }
+
+    const totalAvailableWeight = available.reduce((sum, s) => sum + s.weight, 0);
+    let compositeRate = 0;
+
+    const breakdown = signals.map(s => {
+        if (s.value === null) {
+            return { ...s, contribution: 0 };
+        }
+        const adjustedWeight = s.weight / totalAvailableWeight; // Normalize
+        const contribution = adjustedWeight * s.value;
+        compositeRate += contribution;
+        return { ...s, weight: adjustedWeight, contribution };
+    });
+
+    // Apply caps
+    compositeRate = Math.min(compositeRate, MAX_GROWTH_CAP);
+    compositeRate = Math.max(compositeRate, 0.02);
 
     return {
-        phase1: nearTerm,
-        phase2: longTerm,
-        trend,
-        rationale1: `Based on ${trend} historical trend; weighted toward recent performance`,
-        rationale2: `Tapering toward mature growth rate; 65% of Phase 1`,
+        rate: compositeRate,
+        breakdown,
+        capexAdjusted: capexAnomaly,
     };
 }
 
 /**
- * Calculate Cost of Equity using CAPM
+ * Determine two-stage growth rates from composite
  */
+function determinePhaseRates(
+    compositeRate: number,
+): { phase1: number; phase2: number; rationale1: string; rationale2: string } {
+    const phase1 = compositeRate; // Use composite directly
+
+    let phase2 = compositeRate * 0.65; // Taper to 65% of Phase 1
+    phase2 = Math.max(phase2, MIN_LONG_TERM_GROWTH);
+    phase2 = Math.min(phase2, MAX_LONG_TERM_GROWTH);
+
+    return {
+        phase1,
+        phase2,
+        rationale1: `Multi-signal composite growth (revenue, OpIncome, normalized FCF, owner earnings)`,
+        rationale2: `Tapering toward mature growth rate; 65% of Phase 1`,
+    };
+}
+
+// ─────────────────────────────────────────────────────────
+// WACC Functions
+// ─────────────────────────────────────────────────────────
+
 function calculateCostOfEquity(riskFreeRate: number, beta: number): number {
     return riskFreeRate + beta * MARKET_RISK_PREMIUM;
 }
 
-/**
- * Calculate After-tax Cost of Debt
- */
 function calculateCostOfDebt(interestExpense: number, totalDebt: number, taxRate: number): { preTax: number; afterTax: number } {
     if (totalDebt <= 0) return { preTax: 0, afterTax: 0 };
     const preTax = interestExpense / totalDebt;
     return { preTax, afterTax: preTax * (1 - taxRate) };
 }
 
-/**
- * Calculate WACC
- */
 function calculateWACC(
     marketCap: number,
     totalDebt: number,
@@ -231,15 +387,14 @@ function calculateWACC(
     const totalValue = marketCap + totalDebt;
     const equityWeight = totalValue > 0 ? marketCap / totalValue : 1;
     const debtWeight = totalValue > 0 ? totalDebt / totalValue : 0;
-
     const wacc = equityWeight * costOfEquity + debtWeight * costOfDebtAfterTax;
-
     return { wacc, equityWeight, debtWeight };
 }
 
-/**
- * Project future cash flows using two-stage growth
- */
+// ─────────────────────────────────────────────────────────
+// Projection & Valuation Functions
+// ─────────────────────────────────────────────────────────
+
 function projectCashFlows(
     baseValue: number,
     phase1Rate: number,
@@ -253,13 +408,7 @@ function projectCashFlows(
         const rate = yr <= PHASE_1_YEARS ? phase1Rate : phase2Rate;
         const phase = yr <= PHASE_1_YEARS ? 'Phase 1 (High Growth)' : 'Phase 2 (Moderate Growth)';
         current = current * (1 + rate);
-        projections.push({
-            year: yr,
-            calendarYear: baseYear + yr,
-            value: current,
-            growthRate: rate,
-            phase,
-        });
+        projections.push({ year: yr, calendarYear: baseYear + yr, value: current, growthRate: rate, phase });
     }
 
     return projections;
@@ -267,11 +416,14 @@ function projectCashFlows(
 
 /**
  * Calculate terminal value using both methods
+ * For FCF-based: uses EV/FCF multiple
+ * For earnings-based: uses P/E multiple
  */
 function calculateTerminalValue(
     finalCashFlow: number,
     wacc: number,
-    exitMultiple: number = DEFAULT_EXIT_PE,
+    exitMultiple: number,
+    _multipleType: string,
 ): {
     perpetuity: number;
     exitMult: number;
@@ -279,18 +431,14 @@ function calculateTerminalValue(
     gap: number;
     warnings: string[];
 } {
-    // Perpetuity Growth Method
     if (wacc <= TERMINAL_GROWTH_RATE) {
         throw new Error('WACC must be greater than terminal growth rate');
     }
     const perpetuity = (finalCashFlow * (1 + TERMINAL_GROWTH_RATE)) / (wacc - TERMINAL_GROWTH_RATE);
-
-    // Exit Multiple Method
     const exitMult = finalCashFlow * exitMultiple;
-
     const average = (perpetuity + exitMult) / 2;
+    const gap = Math.abs(perpetuity - exitMult) / Math.min(Math.abs(perpetuity), Math.abs(exitMult));
 
-    const gap = Math.abs(perpetuity - exitMult) / Math.min(perpetuity, exitMult);
     const warnings: string[] = [];
     if (gap > 0.50) {
         warnings.push(`Terminal value methods differ by ${(gap * 100).toFixed(1)}% — review assumptions`);
@@ -299,9 +447,6 @@ function calculateTerminalValue(
     return { perpetuity, exitMult, average, gap, warnings };
 }
 
-/**
- * Discount future values to present value
- */
 function discountToPresent(cashFlows: number[], wacc: number): { pvs: number[]; total: number } {
     const pvs = cashFlows.map((cf, i) => cf / Math.pow(1 + wacc, i + 1));
     const total = pvs.reduce((sum, pv) => sum + pv, 0);
@@ -309,25 +454,84 @@ function discountToPresent(cashFlows: number[], wacc: number): { pvs: number[]; 
 }
 
 /**
- * Calculate intrinsic value per share
+ * Shared intrinsic value computation — used by BOTH base case and sensitivity.
+ * This eliminates the inconsistency where sensitivity used different terminal value methods.
  */
-function calculateIntrinsicValue(
-    sumPvCashFlows: number,
-    pvTerminalValue: number,
+function computeIntrinsicValue(
+    projectedCashFlows: number[],
+    wacc: number,
+    exitMultiple: number,
+    multipleType: string,
     totalDebt: number,
     cash: number,
     sharesOutstanding: number,
-): { enterpriseValue: number; netDebt: number; equityValue: number; perShare: number } {
-    const enterpriseValue = sumPvCashFlows + pvTerminalValue;
+): { intrinsicPerShare: number; enterpriseValue: number; netDebt: number; pvCashFlows: number; pvTerminalValue: number } {
+    const { total: pvCashFlows } = discountToPresent(projectedCashFlows, wacc);
+
+    const finalCF = projectedCashFlows[projectedCashFlows.length - 1];
+    const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType);
+    const pvTerminalValue = tv.average / Math.pow(1 + wacc, PROJECTION_YEARS);
+
+    const enterpriseValue = pvCashFlows + pvTerminalValue;
     const netDebt = totalDebt - cash;
     const equityValue = enterpriseValue - netDebt;
-    const perShare = sharesOutstanding > 0 ? equityValue / sharesOutstanding : 0;
-    return { enterpriseValue, netDebt, equityValue, perShare };
+    const intrinsicPerShare = sharesOutstanding > 0 ? equityValue / sharesOutstanding : 0;
+
+    return { intrinsicPerShare, enterpriseValue, netDebt, pvCashFlows, pvTerminalValue };
 }
 
+// ─────────────────────────────────────────────────────────
+// Reverse DCF
+// ─────────────────────────────────────────────────────────
+
 /**
- * Generate investment recommendation
+ * Solve for the implied growth rate that justifies the current market price.
+ * Uses binary search since the relationship is monotonic.
  */
+function reverseImpliedGrowth(
+    currentPrice: number,
+    sharesOutstanding: number,
+    baseValue: number,
+    wacc: number,
+    exitMultiple: number,
+    multipleType: string,
+    totalDebt: number,
+    cash: number,
+    baseYear: number,
+): number {
+    const targetEV = currentPrice * sharesOutstanding + totalDebt - cash;
+
+    let low = -0.10;
+    let high = 0.60;
+
+    for (let iter = 0; iter < 50; iter++) {
+        const mid = (low + high) / 2;
+        const phase2 = Math.max(mid * 0.65, MIN_LONG_TERM_GROWTH);
+        const proj = projectCashFlows(baseValue, mid, phase2, baseYear);
+        const projValues = proj.map(p => p.value);
+
+        const { total: pvCF } = discountToPresent(projValues, wacc);
+        const finalCF = projValues[projValues.length - 1];
+        const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType);
+        const pvTV = tv.average / Math.pow(1 + wacc, PROJECTION_YEARS);
+        const ev = pvCF + pvTV;
+
+        if (ev < targetEV) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+
+        if (Math.abs(high - low) < 0.001) break;
+    }
+
+    return (low + high) / 2;
+}
+
+// ─────────────────────────────────────────────────────────
+// Recommendation & Sensitivity
+// ─────────────────────────────────────────────────────────
+
 function generateRecommendation(
     intrinsicValue: number,
     currentPrice: number,
@@ -348,62 +552,64 @@ function generateRecommendation(
 }
 
 /**
- * Run sensitivity analysis
+ * Sensitivity analysis — all scenarios use the same computeIntrinsicValue path
  */
 function runSensitivityAnalysis(
-    projectedCashFlows: number[],
-    terminalValueBase: number,
-    netDebt: number,
-    shares: number,
-    currentPrice: number,
+    baseValue: number,
+    baseYear: number,
     baseWacc: number,
     phase1Rate: number,
     phase2Rate: number,
-    baseValue: number,
-    baseYear: number,
+    exitMultiple: number,
+    multipleType: string,
+    totalDebt: number,
+    cash: number,
+    shares: number,
+    currentPrice: number,
+    baseIntrinsicValue: number,
 ): DCFResult['sensitivityAnalysis'] {
     // WACC sensitivity
     const waccScenarios = [-SENSITIVITY_WACC_DELTA, 0, SENSITIVITY_WACC_DELTA].map(delta => {
         const w = baseWacc + delta;
-        const { total: pvCF } = discountToPresent(projectedCashFlows, w);
-        const pvTV = terminalValueBase / Math.pow(1 + w, PROJECTION_YEARS);
-        const ev = pvCF + pvTV;
-        const eq = ev - netDebt;
-        const iv = shares > 0 ? eq / shares : 0;
-        const ud = currentPrice > 0 ? (iv / currentPrice) - 1 : 0;
+        const proj = projectCashFlows(baseValue, phase1Rate, phase2Rate, baseYear);
+        const projValues = proj.map(p => p.value);
+        const { intrinsicPerShare } = computeIntrinsicValue(projValues, w, exitMultiple, multipleType, totalDebt, cash, shares);
+        const ud = currentPrice > 0 ? (intrinsicPerShare / currentPrice) - 1 : 0;
         const label = delta < 0 ? 'Optimistic (Lower WACC)' : delta === 0 ? 'Base Case' : 'Conservative (Higher WACC)';
-        return { scenario: label, wacc: w, intrinsicValue: iv, upsideDownside: ud };
+        return { scenario: label, wacc: w, intrinsicValue: intrinsicPerShare, upsideDownside: ud };
     });
 
     // Growth sensitivity
     const growthDeltas = [
-        { label: 'Conservative Growth', p1: phase1Rate * 0.78, p2: phase2Rate * 0.79 },
+        { label: 'Conservative Growth (-20%)', p1: phase1Rate * 0.80, p2: phase2Rate * 0.80 },
         { label: 'Base Case', p1: phase1Rate, p2: phase2Rate },
-        { label: 'Optimistic Growth', p1: phase1Rate * 1.20, p2: phase2Rate * 1.19 },
+        { label: 'Optimistic Growth (+20%)', p1: phase1Rate * 1.20, p2: phase2Rate * 1.20 },
     ];
     const growthScenarios = growthDeltas.map(gd => {
         const proj = projectCashFlows(baseValue, gd.p1, gd.p2, baseYear);
         const projValues = proj.map(p => p.value);
-        const { total: pvCF } = discountToPresent(projValues, baseWacc);
-        const finalCF = projValues[projValues.length - 1];
-        const tv = (finalCF * (1 + TERMINAL_GROWTH_RATE)) / (baseWacc - TERMINAL_GROWTH_RATE);
-        const pvTV = tv / Math.pow(1 + baseWacc, PROJECTION_YEARS);
-        const iv = shares > 0 ? (pvCF + pvTV - netDebt) / shares : 0;
-        const ud = currentPrice > 0 ? (iv / currentPrice) - 1 : 0;
-        return { scenario: gd.label, phase1Growth: gd.p1, phase2Growth: gd.p2, intrinsicValue: iv, upsideDownside: ud };
+        const { intrinsicPerShare } = computeIntrinsicValue(projValues, baseWacc, exitMultiple, multipleType, totalDebt, cash, shares);
+        const ud = currentPrice > 0 ? (intrinsicPerShare / currentPrice) - 1 : 0;
+        return { scenario: gd.label, phase1Growth: gd.p1, phase2Growth: gd.p2, intrinsicValue: intrinsicPerShare, upsideDownside: ud };
     });
 
     // Terminal growth sensitivity
     const tgDeltas = [-0.005, 0, 0.005];
-    const baseIV = waccScenarios.find(s => s.scenario === 'Base Case')?.intrinsicValue ?? 0;
     const termGrowthScenarios = tgDeltas.map(delta => {
         const tg = TERMINAL_GROWTH_RATE + delta;
-        const finalCF = projectedCashFlows[projectedCashFlows.length - 1];
-        const tv = (finalCF * (1 + tg)) / (baseWacc - tg);
-        const { total: pvCF } = discountToPresent(projectedCashFlows, baseWacc);
-        const pvTV = tv / Math.pow(1 + baseWacc, PROJECTION_YEARS);
-        const iv = shares > 0 ? (pvCF + pvTV - netDebt) / shares : 0;
-        const impact = baseIV > 0 ? (iv - baseIV) / baseIV : 0;
+        // Use perpetuity-only with adjusted terminal growth for this sensitivity
+        const proj = projectCashFlows(baseValue, phase1Rate, phase2Rate, baseYear);
+        const projValues = proj.map(p => p.value);
+        const { total: pvCF } = discountToPresent(projValues, baseWacc);
+        const finalCF = projValues[projValues.length - 1];
+        const adjustedTV = (finalCF * (1 + tg)) / (baseWacc - tg);
+        const exitTV = finalCF * exitMultiple;
+        const avgTV = (adjustedTV + exitTV) / 2;
+        const pvTV = avgTV / Math.pow(1 + baseWacc, PROJECTION_YEARS);
+        const ev = pvCF + pvTV;
+        const netDebt = totalDebt - cash;
+        const iv = shares > 0 ? (ev - netDebt) / shares : 0;
+        const impact = baseIntrinsicValue > 0 ? (iv - baseIntrinsicValue) / baseIntrinsicValue : 0;
         return { terminalGrowth: tg, intrinsicValue: iv, impactVsBase: impact };
     });
 
@@ -415,12 +621,12 @@ function runSensitivityAnalysis(
 }
 
 // ─────────────────────────────────────────────────────────
-// Helper: calculate effective tax rate from financial statements
+// Helpers
 // ─────────────────────────────────────────────────────────
 
 function calculateEffectiveTaxRate(statements: FinancialStatement[]): number {
     const validTaxRates: number[] = [];
-    for (const stmt of statements.slice(0, 3)) { // Use last 3 years for stability
+    for (const stmt of statements.slice(0, 3)) {
         if (stmt.incomeTaxExpense !== undefined && stmt.incomeBeforeTax !== undefined && stmt.incomeBeforeTax > 0) {
             const rate = stmt.incomeTaxExpense / stmt.incomeBeforeTax;
             if (rate > 0 && rate < 1) {
@@ -436,33 +642,19 @@ function calculateEffectiveTaxRate(statements: FinancialStatement[]): number {
 // Main Orchestrator
 // ─────────────────────────────────────────────────────────
 
-/**
- * Run complete DCF analysis for a stock
- * 
- * @param symbol Stock ticker (e.g., "MSFT", "AAPL")
- * @returns Full structured DCF result
- */
 export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const startTime = Date.now();
     const sym = symbol.toUpperCase().trim();
-    console.log(`\n📈 [DCF] Starting DCF analysis for ${sym}...`);
+    console.log(`\n📈 [DCF v2] Starting DCF analysis for ${sym}...`);
 
     // ─── Step 1: Data Collection ─────────────────────
     console.log(`📊 [DCF] Step 1: Collecting data...`);
 
-    // Fetch overview (1 API call — has beta, market cap, P/E, EPS, shares outstanding)
     const overview: CompanyOverview = await fetchCompanyOverview(sym);
-
-    // Fetch financial statements — 3 API calls (income, balance, cash flow)
     const statements: FinancialStatement[] = await fetchFinancialStatements(sym, 'annual', 5);
-
-    // Fetch treasury yield — 1 API call
     const riskFreeRate: number = await fetchTreasuryYield();
-
-    // Fetch annual EPS — 1 API call
     const annualEarnings = await fetchAnnualEarnings(sym, 10);
 
-    // Data validation
     if (statements.length < 3) {
         throw new APIError(
             `Insufficient historical data for DCF analysis of ${sym}. Need at least 3 years, got ${statements.length}.`,
@@ -480,16 +672,13 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const currentPE = overview.peRatio ?? null;
     const currentEPS = overview.eps ?? null;
 
-    // Shares outstanding from overview (in number of shares)
-    // Alpha Vantage OVERVIEW returns MarketCapitalization and EPS
-    // shares ≈ MarketCap / (EPS × P/E) or directly from SharesOutstanding field
+    // Shares outstanding
     let sharesOutstanding = 0;
     if (currentEPS && currentEPS > 0 && currentPE && currentPE > 0) {
         const impliedPrice = currentEPS * currentPE;
         sharesOutstanding = impliedPrice > 0 ? marketCap / impliedPrice : 0;
     }
-    if (sharesOutstanding <= 0 && marketCap > 0 && currentEPS && currentEPS > 0) {
-        // Fallback: use 52-week average price
+    if (sharesOutstanding <= 0 && marketCap > 0) {
         const avg52 = ((overview.week52High ?? 0) + (overview.week52Low ?? 0)) / 2;
         if (avg52 > 0) {
             sharesOutstanding = marketCap / avg52;
@@ -497,57 +686,94 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     }
     if (sharesOutstanding <= 0) {
         dataGaps.push('Could not reliably determine shares outstanding');
-        sharesOutstanding = 1; // prevent division by zero
+        sharesOutstanding = 1;
     }
 
-    // Current price from overview
+    // Current price
     const currentPrice = (currentEPS && currentPE) ? currentEPS * currentPE :
         (overview.week52High && overview.week52Low ? (overview.week52High + overview.week52Low) / 2 : 0);
 
-    // Financial data from statements (sorted most recent first)
+    // Sort statements most recent first
     const sortedStatements = [...statements].sort((a, b) => b.fiscalYear - a.fiscalYear);
 
-    // Most recent balance sheet data
+    // Balance sheet data (avoid double-counting: use max of totalDebt, longTermDebt+shortTermDebt)
     const latestStmt = sortedStatements[0];
-    const totalDebtLong = latestStmt.totalDebt ?? 0;
+    const longTermDebt = latestStmt.totalDebt ?? 0;
     const shortTermDebt = latestStmt.shortTermDebt ?? 0;
-    const totalDebt = totalDebtLong + shortTermDebt;
+    // totalDebt field from AV is actually longTermDebt; add shortTermDebt
+    const totalDebt = longTermDebt + shortTermDebt;
     const cash = latestStmt.cash ?? 0;
     const interestExpense = latestStmt.interestExpense ?? 0;
 
-    // Tax rate
     const taxRate = calculateEffectiveTaxRate(sortedStatements);
 
-    // ─── Step 3: Determine DCF method ────────────────
-    console.log(`📊 [DCF] Step 3: Determining DCF method...`);
+    // ─── Step 3: Capex decomposition & anomaly detection ────
+    console.log(`📊 [DCF] Step 3: Analyzing capex profile...`);
 
-    // Check if FCF data is usable
-    const fcfData = sortedStatements
-        .filter(s => s.freeCashFlow !== undefined && s.freeCashFlow > 0)
-        .map(s => ({ year: s.fiscalYear, value: s.freeCashFlow! }));
+    const capexAnomaly = detectCapexAnomaly(sortedStatements);
 
+    // Compute normalized FCF and owner earnings for each year
+    const enrichedData = sortedStatements.map(s => {
+        const da = s.depreciationAndAmortization ?? 0;
+        const opCF = s.operatingCashFlow ?? 0;
+        const ni = s.netIncome ?? 0;
+        const totalCapex = Math.abs(s.capitalExpenditures ?? 0);
+        const maintenanceCapex = da;
+        const growthCapex = Math.max(0, totalCapex - maintenanceCapex);
+
+        return {
+            year: s.fiscalYear,
+            revenue: s.revenue,
+            operatingIncome: s.operatingIncome,
+            netIncome: ni,
+            freeCashFlow: s.freeCashFlow,
+            normalizedFCF: opCF > 0 && da > 0 ? calculateNormalizedFCF(opCF, da) : undefined,
+            ownerEarnings: ni > 0 && da > 0 ? calculateOwnerEarnings(ni, da) : undefined,
+            operatingCashFlow: opCF,
+            capex: s.capitalExpenditures,
+            depreciationAndAmortization: da > 0 ? da : undefined,
+            maintenanceCapex: da > 0 ? maintenanceCapex : undefined,
+            growthCapex: da > 0 ? growthCapex : undefined,
+        };
+    });
+
+    // ─── Step 4: Multi-signal growth rate analysis ────
+    console.log(`📊 [DCF] Step 4: Computing composite growth rate...`);
+
+    // EPS data from annual earnings
     const epsData = annualEarnings
         .filter(e => e.reportedEPS > 0)
         .map(e => ({ year: parseInt(e.fiscalDateEnding.substring(0, 4)), value: e.reportedEPS }));
 
+    // Determine DCF method
+    const fcfData = sortedStatements
+        .filter(s => s.freeCashFlow !== undefined && s.freeCashFlow > 0)
+        .map(s => ({ year: s.fiscalYear, value: s.freeCashFlow! }));
+
     let dcfMethod: 'fcf_based' | 'earnings_based';
     let baseValue: number;
     let baseMetric: string;
-    let historicalValues: { year: number; value: number }[];
 
-    if (fcfData.length >= 3) {
-        // FCF-based: use total FCF (not per-share)
+    // Prefer normalized FCF if available, fall back to raw FCF, then earnings
+    const normFCFData = enrichedData
+        .filter(d => d.normalizedFCF !== undefined && d.normalizedFCF > 0)
+        .map(d => ({ year: d.year, value: d.normalizedFCF! }));
+
+    if (normFCFData.length >= 3 || fcfData.length >= 3) {
         dcfMethod = 'fcf_based';
-        baseValue = fcfData[0].value; // Most recent FCF
-        baseMetric = 'Free Cash Flow (Total, millions)';
-        historicalValues = fcfData;
-        console.log(`📊 [DCF] Using FCF-based approach (${fcfData.length} years of positive FCF)`);
+        // Use normalized FCF as base if available, otherwise raw FCF
+        if (normFCFData.length >= 3) {
+            baseValue = normFCFData[0].value; // Most recent normalized FCF
+            baseMetric = 'Normalized Free Cash Flow (OCF − Maintenance Capex)';
+        } else {
+            baseValue = fcfData[0].value;
+            baseMetric = 'Free Cash Flow (Total)';
+        }
+        console.log(`📊 [DCF] Using FCF-based approach`);
     } else if (epsData.length >= 3) {
-        // Earnings-based: use total earnings (EPS × shares)
         dcfMethod = 'earnings_based';
-        baseValue = epsData[0].value * sharesOutstanding; // Convert EPS to total earnings
+        baseValue = epsData[0].value * sharesOutstanding;
         baseMetric = 'Total Earnings (EPS × Shares)';
-        historicalValues = epsData.map(e => ({ year: e.year, value: e.value * sharesOutstanding }));
         console.log(`📊 [DCF] Using Earnings-based approach (${epsData.length} years of positive EPS)`);
     } else {
         throw new APIError(
@@ -556,53 +782,50 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         );
     }
 
-    // ─── Step 4: Growth rate analysis ────────────────
-    console.log(`📊 [DCF] Step 4: Calculating growth rates...`);
-
-    // Sort historical values by year ascending for CAGR
-    const sortedHist = [...historicalValues].sort((a, b) => a.year - b.year);
-
-    let cagr3yr: number | null = null;
-    let cagr5yr: number | null = null;
-
-    if (sortedHist.length >= 4) {
-        const end = sortedHist[sortedHist.length - 1].value;
-        const begin3 = sortedHist[Math.max(0, sortedHist.length - 4)].value;
-        cagr3yr = calculateCAGR(begin3, end, 3);
-    }
-    if (sortedHist.length >= 6) {
-        const end = sortedHist[sortedHist.length - 1].value;
-        const begin5 = sortedHist[Math.max(0, sortedHist.length - 6)].value;
-        cagr5yr = calculateCAGR(begin5, end, 5);
-    }
+    // Compute CAGRs for each signal
+    const sortedByYearAsc = [...sortedStatements].sort((a, b) => a.fiscalYear - b.fiscalYear);
 
     // Revenue CAGR
-    const revData = sortedStatements
-        .filter(s => s.revenue !== undefined && s.revenue > 0)
-        .sort((a, b) => a.fiscalYear - b.fiscalYear);
-    let revCagr3yr: number | null = null;
-    if (revData.length >= 4) {
-        revCagr3yr = calculateCAGR(
-            revData[Math.max(0, revData.length - 4)].revenue!,
-            revData[revData.length - 1].revenue!,
-            3
-        );
-    }
+    const revValues = sortedByYearAsc.filter(s => s.revenue && s.revenue > 0);
+    const revCagr3yr = revValues.length >= 4
+        ? calculateCAGR(revValues[Math.max(0, revValues.length - 4)].revenue!, revValues[revValues.length - 1].revenue!, 3)
+        : null;
 
-    // EPS CAGR
-    let epsCagr3yr: number | null = null;
-    const sortedEPS = [...epsData].sort((a, b) => a.year - b.year);
-    if (sortedEPS.length >= 4) {
-        epsCagr3yr = calculateCAGR(
-            sortedEPS[Math.max(0, sortedEPS.length - 4)].value,
-            sortedEPS[sortedEPS.length - 1].value,
-            3
-        );
-    }
+    // Operating Income CAGR
+    const opIncValues = sortedByYearAsc.filter(s => s.operatingIncome && s.operatingIncome > 0);
+    const opIncomeCagr3yr = opIncValues.length >= 4
+        ? calculateCAGR(opIncValues[Math.max(0, opIncValues.length - 4)].operatingIncome!, opIncValues[opIncValues.length - 1].operatingIncome!, 3)
+        : null;
 
-    const growth = determineGrowthRates(cagr3yr, cagr5yr);
+    // Normalized FCF CAGR
+    const normFCFAsc = [...normFCFData].sort((a, b) => a.year - b.year);
+    const normalizedFcfCagr3yr = normFCFAsc.length >= 4
+        ? calculateCAGR(normFCFAsc[Math.max(0, normFCFAsc.length - 4)].value, normFCFAsc[normFCFAsc.length - 1].value, 3)
+        : null;
 
-    // ─── Step 5: WACC calculation ────────────────────
+    // Owner Earnings CAGR
+    const oeData = enrichedData
+        .filter(d => d.ownerEarnings !== undefined && d.ownerEarnings > 0)
+        .sort((a, b) => a.year - b.year);
+    const ownerEarningsCagr3yr = oeData.length >= 4
+        ? calculateCAGR(oeData[Math.max(0, oeData.length - 4)].ownerEarnings!, oeData[oeData.length - 1].ownerEarnings!, 3)
+        : null;
+
+    // Raw FCF CAGR (for transparency)
+    const fcfAsc = [...fcfData].sort((a, b) => a.year - b.year);
+    const rawFcfCagr3yr = fcfAsc.length >= 4
+        ? calculateCAGR(fcfAsc[Math.max(0, fcfAsc.length - 4)].value, fcfAsc[fcfAsc.length - 1].value, 3)
+        : null;
+
+    // Compute composite growth
+    const composite = computeCompositeGrowth(
+        revCagr3yr, opIncomeCagr3yr, normalizedFcfCagr3yr, ownerEarningsCagr3yr,
+        capexAnomaly.isAnomaly,
+    );
+
+    const growth = determinePhaseRates(composite.rate);
+
+    // ─── Step 5: WACC ────────────────────────────────
     console.log(`📊 [DCF] Step 5: Calculating WACC...`);
 
     const costOfEquity = calculateCostOfEquity(riskFreeRate, beta);
@@ -620,68 +843,119 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`📊 [DCF] Step 7: Calculating terminal value...`);
 
     const finalCashFlow = projectedValues[projectedValues.length - 1];
-    const terminalYear = latestYear + PROJECTION_YEARS;
 
-    // Determine exit multiple
-    let exitPE = DEFAULT_EXIT_PE;
-    if (currentPE && currentPE > 0 && currentPE < 100) {
-        // Use average of current P/E and default (moderate approach)
-        exitPE = Math.round((currentPE + DEFAULT_EXIT_PE) / 2);
+    // Determine exit multiple — use EV/FCF for FCF-based, P/E for earnings-based
+    let exitMultiple: number;
+    let multipleType: string;
+    if (dcfMethod === 'fcf_based') {
+        // EV/FCF from historical data
+        const ev = marketCap + totalDebt - cash;
+        const latestFCF = fcfData.length > 0 ? fcfData[0].value : baseValue;
+        const historicalEvFcf = latestFCF > 0 ? ev / latestFCF : DEFAULT_EXIT_EV_FCF;
+        // Clamp to reasonable range
+        exitMultiple = Math.min(Math.max(historicalEvFcf, 5), 50);
+        exitMultiple = Math.round(exitMultiple);
+        multipleType = 'EV/FCF';
+    } else {
+        // P/E for earnings-based
+        exitMultiple = (currentPE && currentPE > 0 && currentPE < 100)
+            ? Math.round((currentPE + DEFAULT_EXIT_PE) / 2)
+            : DEFAULT_EXIT_PE;
+        multipleType = 'P/E';
     }
 
-    const tv = calculateTerminalValue(finalCashFlow, waccResult.wacc, exitPE);
+    const tv = calculateTerminalValue(finalCashFlow, waccResult.wacc, exitMultiple, multipleType);
 
-    // ─── Step 8: Discount to present value ───────────
-    console.log(`📊 [DCF] Step 8: Discounting to present value...`);
+    // ─── Step 8: Intrinsic value (shared path) ───────
+    console.log(`📊 [DCF] Step 8: Computing intrinsic value...`);
 
-    const { total: pvCashFlows } = discountToPresent(projectedValues, waccResult.wacc);
-    const pvTerminalValue = tv.average / Math.pow(1 + waccResult.wacc, PROJECTION_YEARS);
-    const totalPV = pvCashFlows + pvTerminalValue;
-
-    // ─── Step 9: Intrinsic value ─────────────────────
-    console.log(`📊 [DCF] Step 9: Calculating intrinsic value...`);
-
-    const intrinsic = calculateIntrinsicValue(
-        pvCashFlows, pvTerminalValue, totalDebt, cash, sharesOutstanding
+    const valuation = computeIntrinsicValue(
+        projectedValues, waccResult.wacc, exitMultiple, multipleType,
+        totalDebt, cash, sharesOutstanding,
     );
 
-    // Upside/downside
-    const upsideDownside = currentPrice > 0 ? (intrinsic.perShare / currentPrice) - 1 : 0;
-    const valuation = upsideDownside >= 0 ? 'UNDERVALUED' : 'OVERVALUED';
+    const upsideDownside = currentPrice > 0 ? (valuation.intrinsicPerShare / currentPrice) - 1 : 0;
+    const valuationLabel = upsideDownside >= 0 ? 'UNDERVALUED' : 'OVERVALUED';
 
-    // ─── Step 10: Recommendation ─────────────────────
-    const rec = generateRecommendation(intrinsic.perShare, currentPrice);
+    // ─── Step 9: Reverse DCF ─────────────────────────
+    console.log(`📊 [DCF] Step 9: Running reverse DCF...`);
 
-    // ─── Step 11: Sensitivity analysis ───────────────
-    console.log(`📊 [DCF] Step 11: Running sensitivity analysis...`);
+    const impliedGrowth = reverseImpliedGrowth(
+        currentPrice, sharesOutstanding, baseValue, waccResult.wacc,
+        exitMultiple, multipleType, totalDebt, cash, latestYear,
+    );
+
+    const growthGap = composite.rate > 0 ? ((impliedGrowth - composite.rate) / composite.rate) : 0;
+    let reverseDCFInterpretation: string;
+    if (Math.abs(growthGap) < 0.20) {
+        reverseDCFInterpretation = `Market pricing is consistent with our growth estimate (gap: ${(growthGap * 100).toFixed(0)}%)`;
+    } else if (impliedGrowth > composite.rate) {
+        reverseDCFInterpretation = `Market is pricing in ${(impliedGrowth * 100).toFixed(1)}% growth vs our ${(composite.rate * 100).toFixed(1)}% — ` +
+            `the market expects stronger future performance than historical trends suggest`;
+    } else {
+        reverseDCFInterpretation = `Market is pricing in only ${(impliedGrowth * 100).toFixed(1)}% growth vs our ${(composite.rate * 100).toFixed(1)}% — ` +
+            `potential undervaluation if our growth estimate is accurate`;
+    }
+
+    // ─── Step 10: Sanity gate ────────────────────────
+    console.log(`📊 [DCF] Step 10: Running sanity checks...`);
+
+    const intrinsicVsMarketRatio = currentPrice > 0 ? valuation.intrinsicPerShare / currentPrice : 1;
+    const sanityFlags: string[] = [];
+    let driverAnalysis = '';
+
+    if (intrinsicVsMarketRatio < SANITY_LOW_RATIO || intrinsicVsMarketRatio > SANITY_HIGH_RATIO) {
+        sanityFlags.push(`REVIEW NEEDED — intrinsic value implies ${((1 - intrinsicVsMarketRatio) * 100).toFixed(0)}% mispricing`);
+
+        // Identify the driver
+        if (composite.rate < 0.05 && revCagr3yr !== null && revCagr3yr > 0.10) {
+            driverAnalysis = `Low composite growth rate (${(composite.rate * 100).toFixed(1)}%) despite strong revenue growth (${(revCagr3yr * 100).toFixed(1)}%). ` +
+                `This is likely driven by capex-compressed FCF. Consider that the market is pricing in future returns from current investments.`;
+        } else if (waccResult.wacc > 0.12) {
+            driverAnalysis = `High WACC (${(waccResult.wacc * 100).toFixed(1)}%) may be overly penalizing future cash flows.`;
+        } else if (composite.rate > 0.30) {
+            driverAnalysis = `Very high growth assumption (${(composite.rate * 100).toFixed(1)}%) — verify sustainability.`;
+        } else {
+            driverAnalysis = `Multiple factors contributing. Market implied growth: ${(impliedGrowth * 100).toFixed(1)}% vs model: ${(composite.rate * 100).toFixed(1)}%.`;
+        }
+    }
+
+    // ─── Step 11: Recommendation ─────────────────────
+    const rec = generateRecommendation(valuation.intrinsicPerShare, currentPrice);
+
+    // ─── Step 12: Sensitivity analysis ───────────────
+    console.log(`📊 [DCF] Step 12: Running sensitivity analysis...`);
 
     const sensitivity = runSensitivityAnalysis(
-        projectedValues, tv.average, intrinsic.netDebt, sharesOutstanding,
-        currentPrice, waccResult.wacc, growth.phase1, growth.phase2,
-        baseValue, latestYear,
+        baseValue, latestYear, waccResult.wacc,
+        growth.phase1, growth.phase2,
+        exitMultiple, multipleType,
+        totalDebt, cash, sharesOutstanding, currentPrice,
+        valuation.intrinsicPerShare,
     );
 
-    // ─── Step 12: Risk factors ───────────────────────
+    // ─── Step 13: Risk factors ───────────────────────
     const modelRisks: string[] = [];
     const valuationRisks: string[] = [];
     const companyRisks: string[] = [];
 
-    const tvPctOfEV = intrinsic.enterpriseValue > 0
-        ? pvTerminalValue / intrinsic.enterpriseValue * 100 : 0;
+    const tvPctOfEV = valuation.enterpriseValue > 0
+        ? valuation.pvTerminalValue / valuation.enterpriseValue * 100 : 0;
     if (tvPctOfEV > 60) {
         modelRisks.push(`Terminal value represents ${tvPctOfEV.toFixed(0)}% of total enterprise value`);
     }
     if (tv.warnings.length > 0) {
         modelRisks.push(...tv.warnings);
     }
-    if (growth.phase1 > 0.30) {
-        modelRisks.push(`Phase 1 growth rate (${(growth.phase1 * 100).toFixed(1)}%) is very high`);
+    if (capexAnomaly.isAnomaly) {
+        modelRisks.push(`Capex anomaly detected: ${capexAnomaly.interpretation}`);
     }
-
+    if (sanityFlags.length > 0) {
+        modelRisks.push(...sanityFlags);
+    }
     if (Math.abs(upsideDownside) > 0.30) {
         valuationRisks.push(`Stock trading ${(Math.abs(upsideDownside) * 100).toFixed(1)}% ${upsideDownside > 0 ? 'below' : 'above'} intrinsic value`);
     }
-
     if (beta > 1.5) {
         companyRisks.push(`High beta (${beta.toFixed(2)}) indicates above-average volatility`);
     }
@@ -694,7 +968,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
 
     // ─── Build result ────────────────────────────────
     const responseTime = Date.now() - startTime;
-    console.log(`✅ [DCF] Complete DCF analysis for ${sym} finished in ${responseTime}ms`);
+    console.log(`✅ [DCF v2] Complete DCF analysis for ${sym} finished in ${responseTime}ms`);
 
     const result: DCFResult = {
         metadata: {
@@ -713,22 +987,38 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
         historicalData: {
             yearsAnalyzed: sortedStatements.length,
-            annualData: sortedStatements.map(s => ({
-                year: s.fiscalYear,
-                revenue: s.revenue,
-                eps: epsData.find(e => e.year === s.fiscalYear)?.value ?? undefined,
-                freeCashFlow: s.freeCashFlow,
-                operatingCashFlow: s.operatingCashFlow,
-                capex: s.capitalExpenditures,
+            annualData: enrichedData.map(d => ({
+                year: d.year,
+                revenue: d.revenue,
+                eps: epsData.find(e => e.year === d.year)?.value ?? undefined,
+                freeCashFlow: d.freeCashFlow,
+                normalizedFCF: d.normalizedFCF,
+                ownerEarnings: d.ownerEarnings,
+                operatingCashFlow: d.operatingCashFlow,
+                capex: d.capex,
+                depreciationAndAmortization: d.depreciationAndAmortization,
+                maintenanceCapex: d.maintenanceCapex,
+                growthCapex: d.growthCapex,
             })),
+        },
+        capexAnalysis: {
+            isInvestmentCycle: capexAnomaly.isAnomaly || capexAnomaly.avgGrowthCapexPct > 0.40,
+            avgGrowthCapexPct: capexAnomaly.avgGrowthCapexPct,
+            interpretation: capexAnomaly.interpretation,
         },
         growthAnalysis: {
             historicalGrowthRates: {
-                fcfCagr3yr: cagr3yr,
-                fcfCagr5yr: cagr5yr,
                 revenueCagr3yr: revCagr3yr,
-                earningsCagr3yr: epsCagr3yr,
-                growthTrend: growth.trend,
+                opIncomeCagr3yr: opIncomeCagr3yr,
+                normalizedFcfCagr3yr: normalizedFcfCagr3yr,
+                ownerEarningsCagr3yr: ownerEarningsCagr3yr,
+                rawFcfCagr3yr: rawFcfCagr3yr,
+                growthTrend: (revCagr3yr ?? 0) > (rawFcfCagr3yr ?? 0) ? 'Revenue outpacing FCF (likely investment cycle)' : 'Normal',
+            },
+            compositeGrowth: {
+                rate: composite.rate,
+                signalBreakdown: composite.breakdown,
+                capexAdjusted: composite.capexAdjusted,
             },
             projectionAssumptions: {
                 phase1: {
@@ -781,11 +1071,11 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             })),
         },
         terminalValue: {
-            terminalYear,
+            terminalYear: latestYear + PROJECTION_YEARS,
             finalCashFlow,
             methods: {
                 perpetuityGrowth: { growthRate: TERMINAL_GROWTH_RATE, terminalValue: tv.perpetuity },
-                exitMultiple: { multiple: exitPE, multipleType: 'P/E', terminalValue: tv.exitMult },
+                exitMultiple: { multiple: exitMultiple, multipleType, terminalValue: tv.exitMult },
                 average: tv.average,
             },
             validation: {
@@ -796,25 +1086,38 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
         presentValueAnalysis: {
             discountRate: waccResult.wacc,
-            sumPvCashFlows: pvCashFlows,
-            terminalValuePv: pvTerminalValue,
-            totalPv: totalPV,
+            sumPvCashFlows: valuation.pvCashFlows,
+            terminalValuePv: valuation.pvTerminalValue,
+            totalPv: valuation.pvCashFlows + valuation.pvTerminalValue,
         },
         valuationSummary: {
-            enterpriseValuePerShare: sharesOutstanding > 0 ? intrinsic.enterpriseValue / sharesOutstanding : 0,
-            netDebt: intrinsic.netDebt,
-            netDebtPerShare: sharesOutstanding > 0 ? intrinsic.netDebt / sharesOutstanding : 0,
-            intrinsicValue: intrinsic.perShare,
+            enterpriseValuePerShare: sharesOutstanding > 0 ? valuation.enterpriseValue / sharesOutstanding : 0,
+            netDebt: valuation.netDebt,
+            netDebtPerShare: sharesOutstanding > 0 ? valuation.netDebt / sharesOutstanding : 0,
+            intrinsicValue: valuation.intrinsicPerShare,
             currentPrice,
             upsideDownside,
             upsideDownsideFormatted: `${upsideDownside >= 0 ? '+' : ''}${(upsideDownside * 100).toFixed(2)}%`,
-            valuation,
+            valuation: valuationLabel,
+        },
+        reverseDCF: {
+            impliedGrowthRate: impliedGrowth,
+            impliedGrowthFormatted: `${(impliedGrowth * 100).toFixed(2)}%`,
+            modelGrowthRate: composite.rate,
+            gapPercent: growthGap,
+            interpretation: reverseDCFInterpretation,
+        },
+        sanityCheck: {
+            anomalyDetected: sanityFlags.length > 0,
+            intrinsicVsMarketRatio,
+            flags: sanityFlags,
+            driverAnalysis,
         },
         investmentRecommendation: {
             recommendation: rec.recommendation,
             confidence: rec.confidence,
             rationale: rec.rationale,
-            targetPrice: intrinsic.perShare,
+            targetPrice: valuation.intrinsicPerShare,
             expectedReturn: upsideDownside,
         },
         sensitivityAnalysis: sensitivity,
@@ -833,7 +1136,10 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             terminalGrowthRate: TERMINAL_GROWTH_RATE,
             projectionPeriod: PROJECTION_YEARS,
             discountRateSource: 'Calculated WACC',
-            growthRateSource: 'Historical CAGR analysis',
+            growthRateSource: 'Multi-signal composite (revenue, OpIncome, normalized FCF, owner earnings)',
+            growthWeights: composite.capexAdjusted
+                ? { revenue: 0.40, operatingIncome: 0.30, normalizedFCF: 0.15, ownerEarnings: 0.15 }
+                : GROWTH_WEIGHTS,
         },
     };
 

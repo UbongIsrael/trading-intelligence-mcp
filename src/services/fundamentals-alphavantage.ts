@@ -93,6 +93,7 @@ export interface FinancialStatement {
     financingCashFlow?: number;
     freeCashFlow?: number;
     capitalExpenditures?: number;
+    depreciationAndAmortization?: number;
 
     // Margins
     grossMargin?: number;
@@ -204,6 +205,7 @@ interface AlphaVantageCashFlow {
         cashflowFromInvestment: string;
         cashflowFromFinancing: string;
         capitalExpenditures: string;
+        depreciationDepletionAndAmortization: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
@@ -211,6 +213,7 @@ interface AlphaVantageCashFlow {
         cashflowFromInvestment: string;
         cashflowFromFinancing: string;
         capitalExpenditures: string;
+        depreciationDepletionAndAmortization: string;
     }>;
 }
 
@@ -702,6 +705,7 @@ async function _fetchFinancialStatementsFromAPI(
             financingCashFlow: cashFlow ? parseNumber(cashFlow.cashflowFromFinancing) : undefined,
             freeCashFlow: fcf,
             capitalExpenditures: capEx,
+            depreciationAndAmortization: cashFlow ? parseNumber(cashFlow.depreciationDepletionAndAmortization) : undefined,
 
             // Margins (calculated)
             grossMargin: revenue && grossProfit ? (grossProfit / revenue) * 100 : undefined,
