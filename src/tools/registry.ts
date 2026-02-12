@@ -22,6 +22,7 @@ import {
   registerFullFundamentalsTool,
 } from './fundamentals-tool.js';
 import { registerContextualFundamentalsTool } from './contextual-fundamentals-tool.js';
+import { registerDCFAnalysisTool } from './dcf-tool.js';
 
 import {
   registerLiquidityZonesTool,
@@ -98,6 +99,9 @@ export async function registerTools(server: Server): Promise<void> {
   registerFinancialStatementsTool();
   registerFullFundamentalsTool();
   registerContextualFundamentalsTool();
+
+  console.log('  Registering DCF analysis tools...');
+  registerDCFAnalysisTool();
 
   console.log('  Registering liquidity zones tools...');
   registerLiquidityZonesTool();

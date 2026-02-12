@@ -71,6 +71,7 @@ export interface FinancialStatement {
     totalLiabilities?: number;
     totalEquity?: number;
     totalDebt?: number;
+    shortTermDebt?: number;
     currentAssets?: number;
     currentLiabilities?: number;
     cash?: number;
@@ -82,12 +83,16 @@ export interface FinancialStatement {
     operatingIncome?: number;
     netIncome?: number;
     ebitda?: number;
+    interestExpense?: number;
+    incomeTaxExpense?: number;
+    incomeBeforeTax?: number;
 
     // Cash Flow
     operatingCashFlow?: number;
     investingCashFlow?: number;
     financingCashFlow?: number;
     freeCashFlow?: number;
+    capitalExpenditures?: number;
 
     // Margins
     grossMargin?: number;
@@ -116,12 +121,17 @@ interface AlphaVantageOverview {
     '52WeekHigh': string;
     '52WeekLow': string;
     Beta: string;
+    SharesOutstanding: string;
     Address?: string;
     OfficialSite?: string;
 }
 
 interface AlphaVantageEarningsResponse {
     symbol: string;
+    annualEarnings?: Array<{
+        fiscalDateEnding: string;
+        reportedEPS: string;
+    }>;
     quarterlyEarnings: Array<{
         fiscalDateEnding: string;
         reportedDate: string;
@@ -142,6 +152,9 @@ interface AlphaVantageIncomeStatement {
         operatingIncome: string;
         netIncome: string;
         ebitda: string;
+        interestExpense: string;
+        incomeTaxExpense: string;
+        incomeBeforeTax: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
@@ -151,6 +164,9 @@ interface AlphaVantageIncomeStatement {
         operatingIncome: string;
         netIncome: string;
         ebitda: string;
+        interestExpense: string;
+        incomeTaxExpense: string;
+        incomeBeforeTax: string;
     }>;
 }
 
@@ -165,6 +181,7 @@ interface AlphaVantageBalanceSheet {
         totalCurrentLiabilities: string;
         cashAndCashEquivalentsAtCarryingValue: string;
         longTermDebt: string;
+        shortTermDebt: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
@@ -175,6 +192,7 @@ interface AlphaVantageBalanceSheet {
         totalCurrentLiabilities: string;
         cashAndCashEquivalentsAtCarryingValue: string;
         longTermDebt: string;
+        shortTermDebt: string;
     }>;
 }
 
@@ -185,12 +203,14 @@ interface AlphaVantageCashFlow {
         operatingCashflow: string;
         cashflowFromInvestment: string;
         cashflowFromFinancing: string;
+        capitalExpenditures: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
         operatingCashflow: string;
         cashflowFromInvestment: string;
         cashflowFromFinancing: string;
+        capitalExpenditures: string;
     }>;
 }
 
@@ -638,6 +658,16 @@ async function _fetchFinancialStatementsFromAPI(
         const operatingIncome = parseNumber(income.operatingIncome);
         const netIncome = parseNumber(income.netIncome);
 
+        const opCF = cashFlow ? parseNumber(cashFlow.operatingCashflow) : undefined;
+        const capEx = cashFlow ? parseNumber(cashFlow.capitalExpenditures) : undefined;
+        // FCF = Operating Cash Flow - |CapEx| (CapEx is often reported negative)
+        const fcf = (opCF !== undefined && capEx !== undefined)
+            ? opCF - Math.abs(capEx)
+            : undefined;
+
+        const longTermDebt = balance ? parseNumber(balance.longTermDebt) : undefined;
+        const shortTermDebt = balance ? parseNumber(balance.shortTermDebt) : undefined;
+
         statements.push({
             symbol: normalized,
             fiscalYear,
@@ -649,7 +679,8 @@ async function _fetchFinancialStatementsFromAPI(
             totalAssets: balance ? parseNumber(balance.totalAssets) : undefined,
             totalLiabilities: balance ? parseNumber(balance.totalLiabilities) : undefined,
             totalEquity: balance ? parseNumber(balance.totalShareholderEquity) : undefined,
-            totalDebt: balance ? parseNumber(balance.longTermDebt) : undefined,
+            totalDebt: longTermDebt,
+            shortTermDebt,
             currentAssets: balance ? parseNumber(balance.totalCurrentAssets) : undefined,
             currentLiabilities: balance ? parseNumber(balance.totalCurrentLiabilities) : undefined,
             cash: balance ? parseNumber(balance.cashAndCashEquivalentsAtCarryingValue) : undefined,
@@ -661,12 +692,16 @@ async function _fetchFinancialStatementsFromAPI(
             operatingIncome,
             netIncome,
             ebitda: parseNumber(income.ebitda),
+            interestExpense: parseNumber(income.interestExpense),
+            incomeTaxExpense: parseNumber(income.incomeTaxExpense),
+            incomeBeforeTax: parseNumber(income.incomeBeforeTax),
 
             // Cash Flow
-            operatingCashFlow: cashFlow ? parseNumber(cashFlow.operatingCashflow) : undefined,
+            operatingCashFlow: opCF,
             investingCashFlow: cashFlow ? parseNumber(cashFlow.cashflowFromInvestment) : undefined,
             financingCashFlow: cashFlow ? parseNumber(cashFlow.cashflowFromFinancing) : undefined,
-            freeCashFlow: undefined, // Calculate if needed
+            freeCashFlow: fcf,
+            capitalExpenditures: capEx,
 
             // Margins (calculated)
             grossMargin: revenue && grossProfit ? (grossProfit / revenue) * 100 : undefined,
@@ -817,6 +852,138 @@ export async function fetchFullFundamentals(symbol: string): Promise<{
         }
         throw new APIError(
             `Failed to fetch full fundamentals for ${symbol}: ${error.message}`,
+            { symbol, originalError: error.message }
+        );
+    }
+}
+
+/**
+ * Fetch 10-year Treasury yield (risk-free rate for WACC/CAPM)
+ * Note: TREASURY_YIELD does not use a stock symbol parameter
+ */
+export async function fetchTreasuryYield(): Promise<number> {
+    const cacheKey = 'treasury_yield_10y';
+
+    try {
+        const cache = getCacheService();
+
+        // Try cache first (1-day TTL for treasury yields)
+        const cached = await cache.fundamentals.get(cacheKey, 'treasury');
+        if (cached && typeof cached === 'object' && 'value' in (cached as any)) {
+            console.log(`📦 [Cache] Hit for treasury yield`);
+            return (cached as any).value;
+        }
+
+        // Special API call - TREASURY_YIELD doesn't use symbol param
+        // We use makeAPICall with an empty symbol and override via additionalParams
+        const apiKey = getApiKey();
+        const url = new URL(apiConfig.alphaVantage.baseUrl);
+        url.searchParams.append('function', 'TREASURY_YIELD');
+        url.searchParams.append('interval', 'monthly');
+        url.searchParams.append('maturity', '10year');
+        url.searchParams.append('apikey', apiKey);
+
+        await respectRateLimit();
+        checkAndResetCounter();
+
+        if (dailyRequestCount >= DAILY_LIMIT) {
+            throw new APIError('Alpha Vantage daily limit reached', { code: 'DAILY_LIMIT_REACHED' });
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+        const response = await fetch(url.toString(), {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new APIError(`Treasury yield API error: ${response.status}`, { status: response.status });
+        }
+
+        const data = await response.json() as any;
+        dailyRequestCount++;
+        console.log(`📊 [Alpha Vantage] Treasury yield request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
+
+        // Extract most recent yield value
+        if (!data.data || data.data.length === 0) {
+            console.warn('⚠️ No treasury yield data available, using default 4.25%');
+            return 0.0425;
+        }
+
+        const yieldValue = parseFloat(data.data[0].value);
+        if (isNaN(yieldValue)) {
+            console.warn('⚠️ Invalid treasury yield value, using default 4.25%');
+            return 0.0425;
+        }
+
+        const riskFreeRate = yieldValue / 100; // Convert from percentage
+
+        // Cache result
+        await cache.fundamentals.set(cacheKey, 'treasury', { value: riskFreeRate } as any);
+        console.log(`📦 [Cache] Stored treasury yield: ${(riskFreeRate * 100).toFixed(2)}%`);
+
+        return riskFreeRate;
+
+    } catch (error: any) {
+        if (error instanceof APIError) throw error;
+        console.warn(`⚠️ Failed to fetch treasury yield: ${error.message}. Using default 4.25%`);
+        return 0.0425; // Sensible fallback
+    }
+}
+
+/**
+ * Fetch annual earnings (EPS) history for DCF analysis
+ * Uses the EARNINGS endpoint's annualEarnings array
+ */
+export async function fetchAnnualEarnings(symbol: string, limit: number = 10): Promise<Array<{
+    fiscalDateEnding: string;
+    reportedEPS: number;
+}>> {
+    validateSymbol(symbol);
+    const normalized = normalizeSymbol(symbol);
+    const dataType = `annual_earnings:${limit}`;
+
+    try {
+        const cache = getCacheService();
+
+        // Try cache first
+        const cached = await cache.fundamentals.get(normalized, dataType);
+        if (cached) {
+            console.log(`📦 [Cache] Hit for ${symbol} annual earnings`);
+            return cached as any;
+        }
+
+        const response = await makeAPICall<AlphaVantageEarningsResponse>('EARNINGS', normalized);
+
+        if (!response.annualEarnings || response.annualEarnings.length === 0) {
+            console.log(`[Alpha Vantage] No annual earnings data found for ${symbol}`);
+            return [];
+        }
+
+        const earnings = response.annualEarnings
+            .slice(0, limit)
+            .filter(e => e.reportedEPS && e.reportedEPS !== 'None')
+            .map(e => ({
+                fiscalDateEnding: e.fiscalDateEnding,
+                reportedEPS: parseFloat(e.reportedEPS),
+            }))
+            .filter(e => !isNaN(e.reportedEPS));
+
+        // Cache result
+        await cache.fundamentals.set(normalized, dataType, earnings as any);
+        console.log(`📦 [Cache] Stored ${symbol} annual earnings (${earnings.length} years)`);
+
+        return earnings;
+
+    } catch (error: any) {
+        if (error instanceof APIError) throw error;
+        throw new APIError(
+            `Failed to fetch annual earnings for ${symbol}: ${error.message}`,
             { symbol, originalError: error.message }
         );
     }
