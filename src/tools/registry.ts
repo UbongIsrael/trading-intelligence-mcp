@@ -69,15 +69,15 @@ export function getRegisteredTools(): ToolDefinition[] {
 }
 
 /**
- * Register all MCP tools
- * This is the main entry point for tool registration
+ * Populate the tool registry (run once at startup)
+ * Fills the toolRegistry array with all tool definitions
  */
-/**
- * Register all MCP tools
- * Central entry point for tool registration
- */
-export async function registerTools(server: Server): Promise<void> {
-  // 1. Execute registration functions to populate the registry
+export async function populateToolRegistry(): Promise<void> {
+  if (toolRegistry.length > 0) {
+    console.log(`📊 Tool registry already populated (${toolRegistry.length} tools)`);
+    return; // Already populated, skip
+  }
+
   console.log('  Registering system tools...');
   await registerHealthCheckTool();
 
@@ -111,8 +111,13 @@ export async function registerTools(server: Server): Promise<void> {
   registerAvailableTimeframesTool();
 
   console.log(`\n📊 Total tools registered: ${toolRegistry.length}`);
+}
 
-  // 2. Set up ListTools handler
+/**
+ * Set up ListTools and CallTool handlers on a Server instance
+ * Can be called multiple times for different Server instances
+ */
+export function setupServerHandlers(server: Server): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: toolRegistry.map(tool => ({
@@ -123,7 +128,6 @@ export async function registerTools(server: Server): Promise<void> {
     };
   });
 
-  // 3. Set up CallTool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = toolRegistry.find(t => t.name === request.params.name);
 
@@ -142,6 +146,15 @@ export async function registerTools(server: Server): Promise<void> {
       };
     }
   });
+}
+
+/**
+ * Register all MCP tools (convenience wrapper)
+ * Populates the registry AND sets up handlers on the given server
+ */
+export async function registerTools(server: Server): Promise<void> {
+  await populateToolRegistry();
+  setupServerHandlers(server);
 }
 
 

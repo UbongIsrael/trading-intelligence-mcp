@@ -10,7 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createContextMiddleware } from '@ctxprotocol/sdk';
 import { config, mcpMetadata, validateConfig, logConfigSummary } from './config.js';
-import { registerTools } from './tools/registry.js';
+import { populateToolRegistry, setupServerHandlers } from './tools/registry.js';
 import { initializeRedis, shutdownRedis } from './cache/index.js';
 
 /**
@@ -19,7 +19,6 @@ import { initializeRedis, shutdownRedis } from './cache/index.js';
  */
 export class HttpMcpServer {
   private app: express.Application;
-  private mcpServer: Server;
   private port: number;
   private server: any;
   private transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -27,23 +26,6 @@ export class HttpMcpServer {
   constructor() {
     this.app = express();
     this.port = config.port;
-
-    // Initialize MCP server with capabilities
-    this.mcpServer = new Server(
-      {
-        name: mcpMetadata.name,
-        version: mcpMetadata.version,
-      },
-      {
-        capabilities: {
-          tools: {
-            listChanged: true
-          },
-          resources: {},
-          prompts: {},
-        },
-      }
-    );
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -128,7 +110,7 @@ export class HttpMcpServer {
           transport = this.transports[sessionId];
           console.log(`🔄 Using existing session: ${sessionId}`);
         } else if (!sessionId && isInitializeRequest(req.body)) {
-          // Create new session
+          // Create new session with its own Server instance
           transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
@@ -136,7 +118,26 @@ export class HttpMcpServer {
               console.log(`✅ New session initialized: ${id}`);
             },
           });
-          await this.mcpServer.connect(transport);
+
+          // Each session gets its own Server instance to avoid
+          // "Already connected to a transport" errors
+          const sessionServer = new Server(
+            {
+              name: mcpMetadata.name,
+              version: mcpMetadata.version,
+            },
+            {
+              capabilities: {
+                tools: { listChanged: true },
+                resources: {},
+                prompts: {},
+              },
+            }
+          );
+
+          // Wire up tool handlers on this session's server
+          setupServerHandlers(sessionServer);
+          await sessionServer.connect(transport);
         } else {
           console.error('❌ Invalid session - no session ID and not initialize request');
           res.status(400).json({ error: 'Invalid session' });
@@ -207,9 +208,9 @@ export class HttpMcpServer {
         console.warn('⚠️  Redis initialization failed, caching will be disabled:', (error as Error).message);
       }
 
-      // Register all MCP tools with output schemas
+      // Register all MCP tools (populate registry only - handlers are set up per-session)
       console.log('🔧 Registering MCP tools with Data Broker Standard...');
-      await registerTools(this.mcpServer);
+      await populateToolRegistry();
       console.log('✅ All tools registered with output schemas');
       console.log('');
 
