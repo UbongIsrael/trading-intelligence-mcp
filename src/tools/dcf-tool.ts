@@ -25,7 +25,7 @@ const DCFInputSchema = z.object({
 // ─────────────────────────────────────────────────────────
 
 function formatDCFOutput(result: DCFResult): string {
-    const { metadata, currentMarketData, growthAnalysis, waccCalculation, cashFlowProjections, terminalValue, valuationSummary, investmentRecommendation, sensitivityAnalysis, riskFactors, dataQuality, historicalData, capexAnalysis, reverseDCF, sanityCheck } = result;
+    const { metadata, currentMarketData, growthAnalysis, waccCalculation, cashFlowProjections, terminalValue, valuationSummary, investmentRecommendation, sensitivityAnalysis, riskFactors, dataQuality, historicalData, capexAnalysis, reverseDCF, sanityCheck, premiumAnalysis } = result;
 
     const fmtNum = (n: number | null | undefined, decimals = 2): string => {
         if (n === null || n === undefined) return 'N/A';
@@ -42,16 +42,17 @@ function formatDCFOutput(result: DCFResult): string {
 
     let output = '';
 
-    // ── Header ──────────────────────────────
+    // ── Header ──────────────────────────────────────
     output += `\n${'═'.repeat(70)}\n`;
-    output += `  📊 DCF ANALYSIS v2: ${metadata.companyName} (${metadata.ticker})\n`;
+    output += `  📊 DCF ANALYSIS v3: ${metadata.companyName} (${metadata.ticker})\n`;
     output += `${'═'.repeat(70)}\n`;
     output += `  Date: ${metadata.analysisDate} | Method: ${metadata.dcfMethod === 'fcf_based' ? 'Free Cash Flow' : 'Earnings-Based'}\n`;
     output += `  Data Source: ${metadata.dataSource}\n`;
 
-    // ── Sanity Check Alert ──────────────────
+    // ── Sanity Check Alert (v3: graduated) ───
     if (sanityCheck.anomalyDetected) {
-        output += `\n  ⚠️  SANITY CHECK WARNING ⚠️\n`;
+        const icon = sanityCheck.severity === 'critical' ? '🚨' : '⚠️';
+        output += `\n  ${icon}  SANITY GATE [${sanityCheck.severity.toUpperCase()}] ${icon}\n`;
         for (const flag of sanityCheck.flags) {
             output += `  🚨 ${flag}\n`;
         }
@@ -115,12 +116,32 @@ function formatDCFOutput(result: DCFResult): string {
     output += `    Phase 2 (${growthAnalysis.projectionAssumptions.phase2.years}): ${fmtPct(growthAnalysis.projectionAssumptions.phase2.growthRate)}\n`;
     output += `      ↳ ${growthAnalysis.projectionAssumptions.phase2.rationale}\n`;
 
-    // ── WACC ────────────────────────────────
+    // v3: Buyback yield
+    const ba = growthAnalysis.buybackAnalysis;
+    output += `\n  💰 BUYBACK YIELD:\n`;
+    output += `    Net Buyback Yield: ${fmtPct(ba.netBuybackYield)} ${ba.netBuybackYield > 0 ? '(share shrinkage → per-share boost)' : ba.netBuybackYield < 0 ? '(net dilution → per-share drag)' : '(neutral)'}\n`;
+    output += `    Organic Growth:           ${fmtPct(ba.organicGrowth)}\n`;
+    output += `    Effective Per-Share Growth: ${fmtPct(ba.effectivePerShareGrowth)}\n`;
+    if (ba.sharesOutstandingCurrent && ba.sharesOutstandingPrior) {
+        output += `    Shares: ${(ba.sharesOutstandingPrior / 1e9).toFixed(2)}B → ${(ba.sharesOutstandingCurrent / 1e9).toFixed(2)}B\n`;
+    }
+
+    // v3: Recency analysis
+    if (growthAnalysis.recencyAnalysis) {
+        const ra = growthAnalysis.recencyAnalysis;
+        output += `\n  📅 RECENCY ANALYSIS (Quarterly):\n`;
+        output += `    Inflection: ${ra.inflectionDetected}\n`;
+        output += `    TTM Revenue Growth: ${fmtPct(ra.ttmGrowthRate)}\n`;
+        output += `    Recency-Adjusted Growth: ${fmtPct(ra.adjustedGrowthRate)}\n`;
+        output += `    Weights: TTM ${(ra.recencyWeights.ttm * 100).toFixed(0)}% | Prior Year ${(ra.recencyWeights.priorYear * 100).toFixed(0)}% | Year Before ${(ra.recencyWeights.yearBefore * 100).toFixed(0)}%\n`;
+    }
+
+    // ── WACC (v3: tiered ERP) ───────────────
     output += `\n${'─'.repeat(70)}\n`;
-    output += `  💰 WACC CALCULATION\n`;
+    output += `  💰 WACC CALCULATION${waccCalculation.netCashDiscount ? ' (🟢 Net Cash Discount Applied)' : ''}\n`;
     output += `${'─'.repeat(70)}\n`;
     output += `  WACC: ${waccCalculation.waccFormatted}\n\n`;
-    output += `  Cost of Equity (CAPM):\n`;
+    output += `  Cost of Equity (CAPM — Tiered ERP):\n`;
     output += `    Formula: ${waccCalculation.components.costOfEquity.formula}\n`;
     output += `    Risk-Free Rate:     ${fmtPct(waccCalculation.components.costOfEquity.riskFreeRate)}\n`;
     output += `    Beta:               ${waccCalculation.components.costOfEquity.beta.toFixed(2)}\n`;
@@ -181,6 +202,19 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  Our Model Growth Rate:      ${fmtPct(reverseDCF.modelGrowthRate)}\n`;
     output += `  Gap:                        ${reverseDCF.gapPercent >= 0 ? '+' : ''}${(reverseDCF.gapPercent * 100).toFixed(0)}%\n`;
     output += `  📋 ${reverseDCF.interpretation}\n`;
+
+    // v3: Premium Analysis
+    if (premiumAnalysis) {
+        output += `\n${'─'.repeat(70)}\n`;
+        output += `  🏢 EV/FCF PREMIUM ANALYSIS\n`;
+        output += `${'─'.repeat(70)}\n`;
+        output += `  Model Implied EV/FCF: ${premiumAnalysis.modelImpliedEvFcf.toFixed(1)}×\n`;
+        output += `  Market EV/FCF:        ${premiumAnalysis.marketEvFcf.toFixed(1)}×\n`;
+        output += `  Premium Gap:          ${((premiumAnalysis.premiumGap - 1) * 100).toFixed(0)}%\n`;
+        if (premiumAnalysis.warning) {
+            output += `  ⚠️ ${premiumAnalysis.warning}\n`;
+        }
+    }
 
     // ── Recommendation ──────────────────────
     output += `\n${'─'.repeat(70)}\n`;

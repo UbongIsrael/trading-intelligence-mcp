@@ -75,6 +75,7 @@ export interface FinancialStatement {
     currentAssets?: number;
     currentLiabilities?: number;
     cash?: number;
+    sharesOutstanding?: number;
 
     // Income Statement
     revenue?: number;
@@ -183,6 +184,7 @@ interface AlphaVantageBalanceSheet {
         cashAndCashEquivalentsAtCarryingValue: string;
         longTermDebt: string;
         shortTermDebt: string;
+        commonStockSharesOutstanding: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
@@ -194,6 +196,7 @@ interface AlphaVantageBalanceSheet {
         cashAndCashEquivalentsAtCarryingValue: string;
         longTermDebt: string;
         shortTermDebt: string;
+        commonStockSharesOutstanding: string;
     }>;
 }
 
@@ -687,6 +690,7 @@ async function _fetchFinancialStatementsFromAPI(
             currentAssets: balance ? parseNumber(balance.totalCurrentAssets) : undefined,
             currentLiabilities: balance ? parseNumber(balance.totalCurrentLiabilities) : undefined,
             cash: balance ? parseNumber(balance.cashAndCashEquivalentsAtCarryingValue) : undefined,
+            sharesOutstanding: balance ? parseNumber(balance.commonStockSharesOutstanding) : undefined,
 
             // Income Statement
             revenue,

@@ -1,16 +1,17 @@
 /**
- * DCF (Discounted Cash Flow) Analysis Service — v2
+ * DCF (Discounted Cash Flow) Analysis Service — v3
  * 
- * Structural refactoring addressing:
- *   1. Multi-signal composite growth engine (rev, OpInc, normFCF, ownerEarnings)
- *   2. Capex decomposition (maintenance vs growth)
- *   3. EV/FCF exit multiple for FCF-based DCF (not P/E)
- *   4. Consistent sensitivity analysis (shared computeIntrinsicValue path)
- *   5. Sanity gate + reverse DCF guardrails
+ * v3 fixes addressing the AAPL $127 catastrophe:
+ *   1. Graduated sanity gate (Critical/Warning/Normal) with confidence override
+ *   2. Recency-weighted growth with quarterly data + inflection detection
+ *   3. Net buyback yield from shares outstanding change
+ *   4. Tiered ERP by market cap + net cash WACC discount
+ *   5. Implied EV/FCF gap disclosure
  * 
- * Pipeline: Data Collection → Growth Analysis → WACC → Projections →
- *           Terminal Value → Discounting → Intrinsic Value →
- *           Sanity Check → Reverse DCF → Sensitivity → Output
+ * Pipeline: Data Collection → Quarterly Recency → Buyback Yield → Growth Analysis →
+ *           WACC (tiered) → Projections → Terminal Value → Discounting →
+ *           Intrinsic Value → Sanity Gate (graduated) → Reverse DCF →
+ *           Premium Analysis → Sensitivity → Output
  */
 
 import {
@@ -27,7 +28,6 @@ import { APIError } from '../types.js';
 // Constants & Defaults
 // ─────────────────────────────────────────────────────────
 
-const MARKET_RISK_PREMIUM = 0.06;
 const TERMINAL_GROWTH_RATE = 0.025;
 const DEFAULT_EXIT_EV_FCF = 20;
 const DEFAULT_EXIT_PE = 20;
@@ -40,9 +40,14 @@ const SENSITIVITY_WACC_DELTA = 0.02;
 const DEFAULT_BETA = 1.0;
 const DEFAULT_TAX_RATE = 0.21;
 
-// Sanity gate thresholds
-const SANITY_LOW_RATIO = 0.40;   // Flag if intrinsic < 40% of market price
-const SANITY_HIGH_RATIO = 3.0;   // Flag if intrinsic > 300% of market price
+// Graduated sanity gate thresholds (v3)
+const SANITY_CRITICAL_LOW = 0.50;
+const SANITY_WARNING_LOW = 0.70;
+const SANITY_WARNING_HIGH = 1.50;
+const SANITY_CRITICAL_HIGH = 2.50;
+
+// Net cash WACC discount
+const NET_CASH_WACC_DISCOUNT = 0.0025; // 25bps
 
 // Composite growth weights
 const GROWTH_WEIGHTS = {
@@ -101,6 +106,20 @@ export interface DCFResult {
             rawFcfCagr3yr: number | null;
             growthTrend: string;
         };
+        recencyAnalysis?: {
+            quarterlyGrowthUsed: boolean;
+            inflectionDetected: 'Accelerating' | 'Decelerating' | 'Stable';
+            ttmGrowthRate: number | null;
+            recencyWeights: { ttm: number; priorYear: number; yearBefore: number };
+            adjustedGrowthRate: number | null;
+        };
+        buybackAnalysis: {
+            netBuybackYield: number;
+            organicGrowth: number;
+            effectivePerShareGrowth: number;
+            sharesOutstandingCurrent?: number;
+            sharesOutstandingPrior?: number;
+        };
         compositeGrowth: {
             rate: number;
             signalBreakdown: Array<{ signal: string; weight: number; value: number | null; contribution: number }>;
@@ -114,6 +133,7 @@ export interface DCFResult {
     waccCalculation: {
         wacc: number;
         waccFormatted: string;
+        netCashDiscount: boolean;
         components: {
             costOfEquity: { value: number; riskFreeRate: number; beta: number; marketRiskPremium: number; formula: string };
             costOfDebt: { preTax: number; afterTax: number; interestExpense: number; totalDebt: number; taxRate: number };
@@ -165,10 +185,17 @@ export interface DCFResult {
         interpretation: string;
     };
     sanityCheck: {
+        severity: 'normal' | 'warning' | 'critical';
         anomalyDetected: boolean;
         intrinsicVsMarketRatio: number;
         flags: string[];
         driverAnalysis: string;
+    };
+    premiumAnalysis?: {
+        modelImpliedEvFcf: number;
+        marketEvFcf: number;
+        premiumGap: number;
+        warning?: string;
     };
     investmentRecommendation: {
         recommendation: string;
@@ -368,8 +395,17 @@ function determinePhaseRates(
 // WACC Functions
 // ─────────────────────────────────────────────────────────
 
-function calculateCostOfEquity(riskFreeRate: number, beta: number): number {
-    return riskFreeRate + beta * MARKET_RISK_PREMIUM;
+/** Tiered Equity Risk Premium by market cap (v3) */
+function getMarketRiskPremium(marketCap: number): number {
+    if (marketCap >= 500e9) return 0.0475;  // Mega-cap: minimal idiosyncratic risk
+    if (marketCap >= 50e9) return 0.0525;  // Large-cap
+    if (marketCap >= 10e9) return 0.0575;  // Mid-cap
+    return 0.0625;                            // Small-cap: full equity risk premium
+}
+
+function calculateCostOfEquity(riskFreeRate: number, beta: number, marketCap: number): number {
+    const erp = getMarketRiskPremium(marketCap);
+    return riskFreeRate + beta * erp;
 }
 
 function calculateCostOfDebt(interestExpense: number, totalDebt: number, taxRate: number): { preTax: number; afterTax: number } {
@@ -529,26 +565,175 @@ function reverseImpliedGrowth(
 }
 
 // ─────────────────────────────────────────────────────────
+// v3: Buyback, Recency, Sanity Gate
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Net buyback yield from shares outstanding change YoY.
+ * Uses basic shares from balance sheet (commonStockSharesOutstanding).
+ * Negative = net dilution (penalizes per-share growth).
+ */
+function computeNetBuybackYield(
+    statements: FinancialStatement[],
+): { yield: number; currentShares?: number; priorShares?: number } {
+    const sorted = [...statements].sort((a, b) => b.fiscalYear - a.fiscalYear);
+    const current = sorted[0]?.sharesOutstanding;
+    const prior = sorted[1]?.sharesOutstanding;
+
+    if (!prior || !current || prior <= 0) {
+        return { yield: 0 };
+    }
+
+    // Positive = buyback (shrinkage), Negative = dilution
+    const buybackYield = (prior - current) / prior;
+    return { yield: buybackYield, currentShares: current, priorShares: prior };
+}
+
+/**
+ * Recency-weighted growth using quarterly data.
+ * Weights: TTM 50%, prior year 30%, year before 20%.
+ * Inflection detection: accelerating (>2× trailing) or decelerating (<0.5× trailing).
+ * Growth cap: max(recentQuarter, 1.5 × trailingAvg).
+ */
+function computeRecencyAdjustedGrowth(
+    annualStatements: FinancialStatement[],
+    quarterlyStatements: FinancialStatement[],
+): {
+    quarterlyGrowthUsed: boolean;
+    inflection: 'Accelerating' | 'Decelerating' | 'Stable';
+    ttmGrowthRate: number | null;
+    weights: { ttm: number; priorYear: number; yearBefore: number };
+    adjustedRate: number | null;
+} {
+    const annSorted = [...annualStatements].sort((a, b) => b.fiscalYear - a.fiscalYear);
+
+    if (quarterlyStatements.length < 2 || annSorted.length < 3) {
+        return { quarterlyGrowthUsed: false, inflection: 'Stable', ttmGrowthRate: null, weights: { ttm: 0.50, priorYear: 0.30, yearBefore: 0.20 }, adjustedRate: null };
+    }
+
+    // TTM revenue growth from quarterly data
+    const qSorted = [...quarterlyStatements].sort((a, b) => {
+        if (b.fiscalYear !== a.fiscalYear) return b.fiscalYear - a.fiscalYear;
+        return (b.fiscalQuarter ?? 0) - (a.fiscalQuarter ?? 0);
+    });
+
+    // Most recent quarter YoY growth (compare Q with same Q prior year)
+    const recentQ = qSorted[0];
+    const priorYearSameQ = qSorted.find(q =>
+        q.fiscalYear === recentQ.fiscalYear - 1 &&
+        q.fiscalQuarter === recentQ.fiscalQuarter
+    );
+
+    let ttmRevenueGrowth: number | null = null;
+    if (recentQ?.revenue && priorYearSameQ?.revenue && priorYearSameQ.revenue > 0) {
+        ttmRevenueGrowth = (recentQ.revenue - priorYearSameQ.revenue) / priorYearSameQ.revenue;
+    }
+
+    if (ttmRevenueGrowth === null) {
+        return { quarterlyGrowthUsed: false, inflection: 'Stable', ttmGrowthRate: null, weights: { ttm: 0.50, priorYear: 0.30, yearBefore: 0.20 }, adjustedRate: null };
+    }
+
+    // Trailing annual revenue growth rates
+    const annRevGrowths: number[] = [];
+    for (let i = 0; i < annSorted.length - 1 && i < 3; i++) {
+        const curr = annSorted[i].revenue;
+        const prev = annSorted[i + 1].revenue;
+        if (curr && prev && prev > 0) {
+            annRevGrowths.push((curr - prev) / prev);
+        }
+    }
+    const trailingAvg = annRevGrowths.length > 0
+        ? annRevGrowths.reduce((a, b) => a + b, 0) / annRevGrowths.length
+        : 0;
+
+    // Inflection detection (bidirectional)
+    let inflection: 'Accelerating' | 'Decelerating' | 'Stable' = 'Stable';
+    let weights = { ttm: 0.50, priorYear: 0.30, yearBefore: 0.20 };
+
+    if (trailingAvg > 0 && ttmRevenueGrowth > 2 * trailingAvg) {
+        inflection = 'Accelerating';
+        weights = { ttm: 0.60, priorYear: 0.25, yearBefore: 0.15 };
+    } else if (trailingAvg > 0 && ttmRevenueGrowth < 0.5 * trailingAvg) {
+        inflection = 'Decelerating';
+        weights = { ttm: 0.60, priorYear: 0.25, yearBefore: 0.15 };
+    }
+
+    // Compute recency-weighted rate
+    const rates: number[] = [];
+    if (ttmRevenueGrowth !== null) rates.push(ttmRevenueGrowth);
+    if (annRevGrowths.length >= 1) rates.push(annRevGrowths[0]); // Most recent annual
+    if (annRevGrowths.length >= 2) rates.push(annRevGrowths[1]); // Year before
+
+    let adjustedRate = 0;
+    const w = [weights.ttm, weights.priorYear, weights.yearBefore];
+    let totalW = 0;
+    for (let i = 0; i < rates.length && i < 3; i++) {
+        adjustedRate += rates[i] * w[i];
+        totalW += w[i];
+    }
+    if (totalW > 0) adjustedRate /= totalW;
+
+    // Growth cap guardrail: max(recentQuarter, 1.5 × trailingAvg)
+    const cap = Math.max(ttmRevenueGrowth, trailingAvg * 1.5);
+    adjustedRate = Math.min(adjustedRate, cap);
+
+    return { quarterlyGrowthUsed: true, inflection, ttmGrowthRate: ttmRevenueGrowth, weights, adjustedRate };
+}
+
+/**
+ * Graduated sanity gate severity (v3)
+ */
+function determineSanitySeverity(ratio: number): 'normal' | 'warning' | 'critical' {
+    if (ratio < SANITY_CRITICAL_LOW || ratio > SANITY_CRITICAL_HIGH) return 'critical';
+    if (ratio < SANITY_WARNING_LOW || ratio > SANITY_WARNING_HIGH) return 'warning';
+    return 'normal';
+}
+
+// ─────────────────────────────────────────────────────────
 // Recommendation & Sensitivity
 // ─────────────────────────────────────────────────────────
 
 function generateRecommendation(
     intrinsicValue: number,
     currentPrice: number,
+    sanitySeverity: 'normal' | 'warning' | 'critical',
 ): { recommendation: string; rationale: string; confidence: string } {
     const upside = (intrinsicValue / currentPrice) - 1;
 
+    let recommendation: string;
+    let rationale: string;
+    let confidence: string;
+
     if (upside >= 0.15) {
-        return { recommendation: 'STRONG BUY', rationale: `Trading ${(Math.abs(upside) * 100).toFixed(1)}% below intrinsic value`, confidence: 'High' };
+        recommendation = 'STRONG BUY';
+        rationale = `Trading ${(Math.abs(upside) * 100).toFixed(1)}% below intrinsic value`;
+        confidence = 'High';
     } else if (upside > 0) {
-        return { recommendation: 'BUY', rationale: `Trading ${(Math.abs(upside) * 100).toFixed(1)}% below intrinsic value`, confidence: 'Moderate' };
+        recommendation = 'BUY';
+        rationale = `Trading ${(Math.abs(upside) * 100).toFixed(1)}% below intrinsic value`;
+        confidence = 'Moderate';
     } else if (upside > -0.15) {
-        return { recommendation: 'HOLD', rationale: `Trading near fair value (${(upside * 100).toFixed(1)}%)`, confidence: 'Moderate' };
+        recommendation = 'HOLD';
+        rationale = `Trading near fair value (${(upside * 100).toFixed(1)}%)`;
+        confidence = 'Moderate';
     } else if (upside > -0.30) {
-        return { recommendation: 'SELL', rationale: `Trading ${(Math.abs(upside) * 100).toFixed(1)}% above intrinsic value`, confidence: 'High' };
+        recommendation = 'SELL';
+        rationale = `Trading ${(Math.abs(upside) * 100).toFixed(1)}% above intrinsic value`;
+        confidence = 'High';
     } else {
-        return { recommendation: 'STRONG SELL', rationale: `Significantly overvalued — trading ${(Math.abs(upside) * 100).toFixed(1)}% above intrinsic value`, confidence: 'High' };
+        recommendation = 'STRONG SELL';
+        rationale = `Significantly overvalued — trading ${(Math.abs(upside) * 100).toFixed(1)}% above intrinsic value`;
+        confidence = 'High';
     }
+
+    // Override confidence based on sanity gate severity (v3)
+    if (sanitySeverity === 'critical') {
+        confidence = 'Very Low — Model Likely Unreliable';
+    } else if (sanitySeverity === 'warning') {
+        confidence = 'Low — Sanity Gate Triggered';
+    }
+
+    return { recommendation, rationale, confidence };
 }
 
 /**
@@ -645,7 +830,7 @@ function calculateEffectiveTaxRate(statements: FinancialStatement[]): number {
 export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const startTime = Date.now();
     const sym = symbol.toUpperCase().trim();
-    console.log(`\n📈 [DCF v2] Starting DCF analysis for ${sym}...`);
+    console.log(`\n📈 [DCF v3] Starting DCF analysis for ${sym}...`);
 
     // ─── Step 1: Data Collection ─────────────────────
     console.log(`📊 [DCF] Step 1: Collecting data...`);
@@ -823,15 +1008,63 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         capexAnomaly.isAnomaly,
     );
 
-    const growth = determinePhaseRates(composite.rate);
+    // ─── Step 4b: Buyback yield (v3) ──────────────────
+    console.log(`📊 [DCF] Step 4b: Computing buyback yield...`);
+    const buyback = computeNetBuybackYield(sortedStatements);
+    const organicGrowth = composite.rate;
+    const effectivePerShareGrowth = composite.rate + buyback.yield;
 
-    // ─── Step 5: WACC ────────────────────────────────
-    console.log(`📊 [DCF] Step 5: Calculating WACC...`);
+    // ─── Step 4c: Recency-weighted growth (v3) ────────
+    console.log(`📊 [DCF] Step 4c: Checking for growth inflection...`);
+    // Conditional fetch: only when annual variance is high or latest annual > 6 months old
+    let quarterlyStatements: FinancialStatement[] = [];
+    const latestReportDate = sortedStatements[0]?.reportDate;
+    const monthsSinceLatest = latestReportDate
+        ? (Date.now() - new Date(latestReportDate).getTime()) / (30 * 24 * 60 * 60 * 1000)
+        : 12;
+    const annualGrowthVariance = (revCagr3yr !== null && rawFcfCagr3yr !== null)
+        ? Math.abs(revCagr3yr - rawFcfCagr3yr)
+        : 0;
+    const shouldFetchQuarterly = annualGrowthVariance > 0.03 || monthsSinceLatest > 6;
 
-    const costOfEquity = calculateCostOfEquity(riskFreeRate, beta);
+    if (shouldFetchQuarterly) {
+        console.log(`📊 [DCF] Fetching quarterly data (variance: ${(annualGrowthVariance * 100).toFixed(1)}pp, staleness: ${monthsSinceLatest.toFixed(0)} months)`);
+        try {
+            quarterlyStatements = await fetchFinancialStatements(sym, 'quarterly', 8);
+        } catch (e) {
+            console.log(`⚠️ [DCF] Quarterly fetch failed, proceeding with annual-only data`);
+            quarterlyStatements = [];
+        }
+    }
+
+    const recency = computeRecencyAdjustedGrowth(sortedStatements, quarterlyStatements);
+
+    // Blend recency-adjusted growth with composite if available
+    let finalGrowthRate = effectivePerShareGrowth;
+    if (recency.adjustedRate !== null && recency.quarterlyGrowthUsed) {
+        // 60% composite, 40% recency-adjusted (ensures we don't overfit to recent quarters)
+        finalGrowthRate = 0.60 * effectivePerShareGrowth + 0.40 * recency.adjustedRate;
+        console.log(`📊 [DCF] Growth: composite=${(effectivePerShareGrowth * 100).toFixed(1)}%, recency=${(recency.adjustedRate * 100).toFixed(1)}%, blended=${(finalGrowthRate * 100).toFixed(1)}%`);
+    }
+    // Cap at MAX_GROWTH_CAP
+    finalGrowthRate = Math.min(finalGrowthRate, MAX_GROWTH_CAP);
+
+    const growth = determinePhaseRates(finalGrowthRate);
+
+    // ─── Step 5: WACC (v3: tiered ERP + net cash) ─────
+    console.log(`📊 [DCF] Step 5: Calculating WACC (tiered ERP)...`);
+
+    const erp = getMarketRiskPremium(marketCap);
+    const costOfEquity = calculateCostOfEquity(riskFreeRate, beta, marketCap);
     const costOfDebt = calculateCostOfDebt(interestExpense, totalDebt, taxRate);
     const waccResult = calculateWACC(marketCap, totalDebt, costOfEquity, costOfDebt.afterTax);
 
+    // Net cash discount: if cash > totalDebt, subtract 25bps from WACC
+    const isNetCash = cash > totalDebt;
+    const effectiveWacc = isNetCash ? Math.max(waccResult.wacc - NET_CASH_WACC_DISCOUNT, 0.01) : waccResult.wacc;
+    if (isNetCash) {
+        console.log(`💰 [DCF] Net cash position detected — WACC reduced by ${(NET_CASH_WACC_DISCOUNT * 10000).toFixed(0)}bps to ${(effectiveWacc * 100).toFixed(2)}%`);
+    }
     // ─── Step 6: Project cash flows ──────────────────
     console.log(`📊 [DCF] Step 6: Projecting cash flows...`);
 
@@ -864,13 +1097,13 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         multipleType = 'P/E';
     }
 
-    const tv = calculateTerminalValue(finalCashFlow, waccResult.wacc, exitMultiple, multipleType);
+    const tv = calculateTerminalValue(finalCashFlow, effectiveWacc, exitMultiple, multipleType);
 
     // ─── Step 8: Intrinsic value (shared path) ───────
     console.log(`📊 [DCF] Step 8: Computing intrinsic value...`);
 
     const valuation = computeIntrinsicValue(
-        projectedValues, waccResult.wacc, exitMultiple, multipleType,
+        projectedValues, effectiveWacc, exitMultiple, multipleType,
         totalDebt, cash, sharesOutstanding,
     );
 
@@ -881,7 +1114,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`📊 [DCF] Step 9: Running reverse DCF...`);
 
     const impliedGrowth = reverseImpliedGrowth(
-        currentPrice, sharesOutstanding, baseValue, waccResult.wacc,
+        currentPrice, sharesOutstanding, baseValue, effectiveWacc,
         exitMultiple, multipleType, totalDebt, cash, latestYear,
     );
 
@@ -897,22 +1130,24 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             `potential undervaluation if our growth estimate is accurate`;
     }
 
-    // ─── Step 10: Sanity gate ────────────────────────
-    console.log(`📊 [DCF] Step 10: Running sanity checks...`);
+    // ─── Step 10: Sanity gate (v3: graduated) ────────
+    console.log(`📊 [DCF] Step 10: Running graduated sanity gate...`);
 
     const intrinsicVsMarketRatio = currentPrice > 0 ? valuation.intrinsicPerShare / currentPrice : 1;
+    const sanitySeverity = determineSanitySeverity(intrinsicVsMarketRatio);
     const sanityFlags: string[] = [];
     let driverAnalysis = '';
 
-    if (intrinsicVsMarketRatio < SANITY_LOW_RATIO || intrinsicVsMarketRatio > SANITY_HIGH_RATIO) {
-        sanityFlags.push(`REVIEW NEEDED — intrinsic value implies ${((1 - intrinsicVsMarketRatio) * 100).toFixed(0)}% mispricing`);
+    if (sanitySeverity !== 'normal') {
+        const label = sanitySeverity === 'critical' ? '⚠️ CRITICAL REVIEW NEEDED' : '⚠️ WARNING';
+        sanityFlags.push(`${label} — intrinsic value implies ${((1 - intrinsicVsMarketRatio) * 100).toFixed(0)}% mispricing (severity: ${sanitySeverity})`);
 
         // Identify the driver
         if (composite.rate < 0.05 && revCagr3yr !== null && revCagr3yr > 0.10) {
             driverAnalysis = `Low composite growth rate (${(composite.rate * 100).toFixed(1)}%) despite strong revenue growth (${(revCagr3yr * 100).toFixed(1)}%). ` +
                 `This is likely driven by capex-compressed FCF. Consider that the market is pricing in future returns from current investments.`;
-        } else if (waccResult.wacc > 0.12) {
-            driverAnalysis = `High WACC (${(waccResult.wacc * 100).toFixed(1)}%) may be overly penalizing future cash flows.`;
+        } else if (effectiveWacc > 0.12) {
+            driverAnalysis = `High WACC (${(effectiveWacc * 100).toFixed(1)}%) may be overly penalizing future cash flows.`;
         } else if (composite.rate > 0.30) {
             driverAnalysis = `Very high growth assumption (${(composite.rate * 100).toFixed(1)}%) — verify sustainability.`;
         } else {
@@ -920,14 +1155,35 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         }
     }
 
-    // ─── Step 11: Recommendation ─────────────────────
-    const rec = generateRecommendation(valuation.intrinsicPerShare, currentPrice);
+    // ─── Step 10b: Premium analysis (v3) ──────────────
+    let premiumAnalysis: DCFResult['premiumAnalysis'] = undefined;
+    if (dcfMethod === 'fcf_based' && fcfData.length > 0) {
+        const latestFCF = fcfData[0].value;
+        const ev = marketCap + totalDebt - cash;
+        const marketEvFcf = latestFCF > 0 ? ev / latestFCF : 0;
+        const modelEV = valuation.enterpriseValue;
+        const modelEvFcf = latestFCF > 0 ? modelEV / latestFCF : 0;
+        const premiumGap = modelEvFcf > 0 ? marketEvFcf / modelEvFcf : 0;
+
+        premiumAnalysis = {
+            modelImpliedEvFcf: modelEvFcf,
+            marketEvFcf,
+            premiumGap,
+        };
+        if (premiumGap > 1.5) {
+            premiumAnalysis.warning = `Market trades at ${marketEvFcf.toFixed(1)}× EV/FCF vs model's ${modelEvFcf.toFixed(1)}× — ` +
+                `${((premiumGap - 1) * 100).toFixed(0)}% intangible premium not captured by DCF (brand, ecosystem, network effects)`;
+        }
+    }
+
+    // ─── Step 11: Recommendation (v3: sanity override) ─
+    const rec = generateRecommendation(valuation.intrinsicPerShare, currentPrice, sanitySeverity);
 
     // ─── Step 12: Sensitivity analysis ───────────────
     console.log(`📊 [DCF] Step 12: Running sensitivity analysis...`);
 
     const sensitivity = runSensitivityAnalysis(
-        baseValue, latestYear, waccResult.wacc,
+        baseValue, latestYear, effectiveWacc,
         growth.phase1, growth.phase2,
         exitMultiple, multipleType,
         totalDebt, cash, sharesOutstanding, currentPrice,
@@ -968,7 +1224,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
 
     // ─── Build result ────────────────────────────────
     const responseTime = Date.now() - startTime;
-    console.log(`✅ [DCF v2] Complete DCF analysis for ${sym} finished in ${responseTime}ms`);
+    console.log(`✅ [DCF v3] Complete DCF analysis for ${sym} finished in ${responseTime}ms`);
 
     const result: DCFResult = {
         metadata: {
@@ -1015,6 +1271,20 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 rawFcfCagr3yr: rawFcfCagr3yr,
                 growthTrend: (revCagr3yr ?? 0) > (rawFcfCagr3yr ?? 0) ? 'Revenue outpacing FCF (likely investment cycle)' : 'Normal',
             },
+            recencyAnalysis: recency.quarterlyGrowthUsed ? {
+                quarterlyGrowthUsed: true,
+                inflectionDetected: recency.inflection,
+                ttmGrowthRate: recency.ttmGrowthRate,
+                recencyWeights: recency.weights,
+                adjustedGrowthRate: recency.adjustedRate,
+            } : undefined,
+            buybackAnalysis: {
+                netBuybackYield: buyback.yield,
+                organicGrowth,
+                effectivePerShareGrowth,
+                sharesOutstandingCurrent: buyback.currentShares,
+                sharesOutstandingPrior: buyback.priorShares,
+            },
             compositeGrowth: {
                 rate: composite.rate,
                 signalBreakdown: composite.breakdown,
@@ -1034,15 +1304,16 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             },
         },
         waccCalculation: {
-            wacc: waccResult.wacc,
-            waccFormatted: `${(waccResult.wacc * 100).toFixed(2)}%`,
+            wacc: effectiveWacc,
+            waccFormatted: `${(effectiveWacc * 100).toFixed(2)}%`,
+            netCashDiscount: isNetCash,
             components: {
                 costOfEquity: {
                     value: costOfEquity,
                     riskFreeRate,
                     beta,
-                    marketRiskPremium: MARKET_RISK_PREMIUM,
-                    formula: `${(riskFreeRate * 100).toFixed(2)}% + (${beta.toFixed(2)} × ${(MARKET_RISK_PREMIUM * 100).toFixed(0)}%) = ${(costOfEquity * 100).toFixed(2)}%`,
+                    marketRiskPremium: erp,
+                    formula: `${(riskFreeRate * 100).toFixed(2)}% + (${beta.toFixed(2)} × ${(erp * 100).toFixed(2)}%) = ${(costOfEquity * 100).toFixed(2)}%${isNetCash ? ' − 25bps net cash' : ''}`,
                 },
                 costOfDebt: {
                     preTax: costOfDebt.preTax,
@@ -1085,7 +1356,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             },
         },
         presentValueAnalysis: {
-            discountRate: waccResult.wacc,
+            discountRate: effectiveWacc,
             sumPvCashFlows: valuation.pvCashFlows,
             terminalValuePv: valuation.pvTerminalValue,
             totalPv: valuation.pvCashFlows + valuation.pvTerminalValue,
@@ -1108,11 +1379,13 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             interpretation: reverseDCFInterpretation,
         },
         sanityCheck: {
+            severity: sanitySeverity,
             anomalyDetected: sanityFlags.length > 0,
             intrinsicVsMarketRatio,
             flags: sanityFlags,
             driverAnalysis,
         },
+        premiumAnalysis,
         investmentRecommendation: {
             recommendation: rec.recommendation,
             confidence: rec.confidence,
@@ -1132,11 +1405,11 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             dataGaps,
         },
         assumptionsUsed: {
-            marketRiskPremium: MARKET_RISK_PREMIUM,
+            marketRiskPremium: erp,
             terminalGrowthRate: TERMINAL_GROWTH_RATE,
             projectionPeriod: PROJECTION_YEARS,
-            discountRateSource: 'Calculated WACC',
-            growthRateSource: 'Multi-signal composite (revenue, OpIncome, normalized FCF, owner earnings)',
+            discountRateSource: `Calculated WACC (tiered ERP: ${(erp * 100).toFixed(2)}%${isNetCash ? ', net cash discount applied' : ''})`,
+            growthRateSource: 'Multi-signal composite + buyback yield + recency weighting',
             growthWeights: composite.capexAdjusted
                 ? { revenue: 0.40, operatingIncome: 0.30, normalizedFCF: 0.15, ownerEarnings: 0.15 }
                 : GROWTH_WEIGHTS,
