@@ -43,6 +43,7 @@ export interface CompanyOverview {
     logo?: string;
     phone?: string;
     timestamp: Date;
+    sharesOutstanding?: number;
 }
 
 export interface ExtendedEarningsData {
@@ -484,6 +485,7 @@ async function _fetchCompanyOverviewFromAPI(symbol: string): Promise<CompanyOver
         logo: undefined, // Not provided
         phone: undefined, // Not provided
         timestamp: new Date(),
+        sharesOutstanding: parseNumber(response.SharesOutstanding),
     };
 
     const responseTime = Date.now() - startTime;

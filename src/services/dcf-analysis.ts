@@ -386,7 +386,7 @@ function determinePhaseRates(
     return {
         phase1,
         phase2,
-        rationale1: `Multi-signal composite growth (revenue, OpIncome, normalized FCF, owner earnings)`,
+        rationale1: `Composite growth + buyback yield + recency weighting (inflection-aware)`,
         rationale2: `Tapering toward mature growth rate; 65% of Phase 1`,
     };
 }
@@ -673,9 +673,9 @@ function computeRecencyAdjustedGrowth(
     }
     if (totalW > 0) adjustedRate /= totalW;
 
-    // Growth cap guardrail: max(recentQuarter, 1.5 × trailingAvg)
-    const cap = Math.max(ttmRevenueGrowth, trailingAvg * 1.5);
-    adjustedRate = Math.min(adjustedRate, cap);
+    // Growth cap guardrail: don't exceed the TTM rate itself (prevents extrapolation)
+    // The weighted average already dampens extreme values; no need for double-capping
+    adjustedRate = Math.min(adjustedRate, ttmRevenueGrowth);
 
     return { quarterlyGrowthUsed: true, inflection, ttmGrowthRate: ttmRevenueGrowth, weights, adjustedRate };
 }
@@ -726,11 +726,15 @@ function generateRecommendation(
         confidence = 'High';
     }
 
-    // Override confidence based on sanity gate severity (v3)
+    // Override recommendation + confidence based on sanity gate severity (v4)
     if (sanitySeverity === 'critical') {
+        recommendation = 'INCONCLUSIVE';
         confidence = 'Very Low — Model Likely Unreliable';
+        rationale = `Model output unreliable — intrinsic value ${(Math.abs(upside) * 100).toFixed(0)}% from market price. DCF limitations apply (see premium analysis).`;
     } else if (sanitySeverity === 'warning') {
+        recommendation = upside >= 0 ? 'POSSIBLY UNDERVALUED' : 'POSSIBLY OVERVALUED';
         confidence = 'Low — Sanity Gate Triggered';
+        rationale += '. Sanity gate triggered — treat as directional signal, not conviction call.';
     }
 
     return { recommendation, rationale, confidence };
@@ -1008,11 +1012,20 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         capexAnomaly.isAnomaly,
     );
 
-    // ─── Step 4b: Buyback yield (v3) ──────────────────
+    // ─── Step 4b: Buyback yield (v3 + v4 fallback) ────
     console.log(`📊 [DCF] Step 4b: Computing buyback yield...`);
-    const buyback = computeNetBuybackYield(sortedStatements);
+    let buybackResult = computeNetBuybackYield(sortedStatements);
+    // Fallback: if balance sheet shares unavailable, use overview shares vs prior year
+    if (buybackResult.yield === 0 && overview.sharesOutstanding && overview.sharesOutstanding > 0) {
+        const priorYearShares = sortedStatements[1]?.sharesOutstanding;
+        if (priorYearShares && priorYearShares > 0) {
+            const fallbackYield = (priorYearShares - overview.sharesOutstanding) / priorYearShares;
+            buybackResult = { yield: fallbackYield, currentShares: overview.sharesOutstanding, priorShares: priorYearShares };
+            console.log(`📊 [DCF] Buyback fallback from overview: yield=${(fallbackYield * 100).toFixed(2)}%`);
+        }
+    }
     const organicGrowth = composite.rate;
-    const effectivePerShareGrowth = composite.rate + buyback.yield;
+    const effectivePerShareGrowth = composite.rate + buybackResult.yield;
 
     // ─── Step 4c: Recency-weighted growth (v3) ────────
     console.log(`📊 [DCF] Step 4c: Checking for growth inflection...`);
@@ -1039,11 +1052,22 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
 
     const recency = computeRecencyAdjustedGrowth(sortedStatements, quarterlyStatements);
 
-    // Blend recency-adjusted growth with composite if available
+    // Blend recency-adjusted growth with composite if available (v4: inflection-aware)
     let finalGrowthRate = effectivePerShareGrowth;
     if (recency.adjustedRate !== null && recency.quarterlyGrowthUsed) {
-        // 60% composite, 40% recency-adjusted (ensures we don't overfit to recent quarters)
-        finalGrowthRate = 0.60 * effectivePerShareGrowth + 0.40 * recency.adjustedRate;
+        let compositeWeight: number;
+        let recencyWeight: number;
+        if (recency.inflection === 'Accelerating' || recency.inflection === 'Decelerating') {
+            // Inflection detected: trust recent data more (35/65)
+            compositeWeight = 0.35;
+            recencyWeight = 0.65;
+            console.log(`📊 [DCF] Inflection [${recency.inflection}]: using 35/65 blend`);
+        } else {
+            // Stable: balanced blend (55/45)
+            compositeWeight = 0.55;
+            recencyWeight = 0.45;
+        }
+        finalGrowthRate = compositeWeight * effectivePerShareGrowth + recencyWeight * recency.adjustedRate;
         console.log(`📊 [DCF] Growth: composite=${(effectivePerShareGrowth * 100).toFixed(1)}%, recency=${(recency.adjustedRate * 100).toFixed(1)}%, blended=${(finalGrowthRate * 100).toFixed(1)}%`);
     }
     // Cap at MAX_GROWTH_CAP
@@ -1279,11 +1303,11 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 adjustedGrowthRate: recency.adjustedRate,
             } : undefined,
             buybackAnalysis: {
-                netBuybackYield: buyback.yield,
+                netBuybackYield: buybackResult.yield,
                 organicGrowth,
                 effectivePerShareGrowth,
-                sharesOutstandingCurrent: buyback.currentShares,
-                sharesOutstandingPrior: buyback.priorShares,
+                sharesOutstandingCurrent: buybackResult.currentShares,
+                sharesOutstandingPrior: buybackResult.priorShares,
             },
             compositeGrowth: {
                 rate: composite.rate,
