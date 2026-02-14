@@ -454,7 +454,7 @@ function projectCashFlows(
 
 /**
  * Dynamic exit multiple — piecewise linear interpolation by Phase 1 growth (v5)
- * Replaces the static DEFAULT_EXIT_EV_FCF = 20 with a growth-calibrated multiple.
+ * v6: Added high-growth discount to prevent double-counting growth embedded in Year 10 FCF.
  * Anchor points derived from market EV/FCF multiples by growth profile.
  */
 function getDynamicExitMultiple(phase1Growth: number): number {
@@ -466,14 +466,42 @@ function getDynamicExitMultiple(phase1Growth: number): number {
         { growth: 0.20, multiple: 34 },
         { growth: 0.30, multiple: 38 },
     ];
+
+    let baseMultiple = anchors[anchors.length - 1].multiple; // default cap
     for (let i = 1; i < anchors.length; i++) {
         if (phase1Growth <= anchors[i].growth) {
             const lo = anchors[i - 1], hi = anchors[i];
             const ratio = (phase1Growth - lo.growth) / (hi.growth - lo.growth);
-            return lo.multiple + ratio * (hi.multiple - lo.multiple);
+            baseMultiple = lo.multiple + ratio * (hi.multiple - lo.multiple);
+            break;
         }
     }
-    return anchors[anchors.length - 1].multiple; // cap at 38×
+
+    // v6: High-growth discount — prevent double-counting growth already in Year 10 FCF
+    if (phase1Growth > 0.30) {
+        const excessGrowth = phase1Growth - 0.30;
+        const discountFactor = 1 - (excessGrowth * 0.5); // 50% haircut on excess growth
+        return Math.max(baseMultiple * discountFactor, 20); // Floor at 20×
+    }
+
+    return baseMultiple;
+}
+
+/**
+ * Growth-based terminal value method weighting (v6)
+ * Stable companies → perpetuity-heavy (Gordon Growth most valid).
+ * High-growth → exit-heavy (exit multiple anchors reality).
+ */
+function getTerminalValueBlend(phase1Growth: number): { perpetuityWeight: number; exitWeight: number } {
+    if (phase1Growth <= 0.07) {
+        return { perpetuityWeight: 0.65, exitWeight: 0.35 };
+    } else if (phase1Growth <= 0.15) {
+        return { perpetuityWeight: 0.55, exitWeight: 0.45 };
+    } else if (phase1Growth <= 0.25) {
+        return { perpetuityWeight: 0.40, exitWeight: 0.60 };
+    } else {
+        return { perpetuityWeight: 0.30, exitWeight: 0.70 };
+    }
 }
 
 /**
@@ -486,11 +514,13 @@ function calculateTerminalValue(
     wacc: number,
     exitMultiple: number,
     _multipleType: string,
+    phase1Growth: number = 0.10, // v6: used for growth-based TV blend
 ): {
     perpetuity: number;
     exitMult: number;
     average: number;
     gap: number;
+    blend: { perpetuityWeight: number; exitWeight: number };
     warnings: string[];
 } {
     if (wacc <= TERMINAL_GROWTH_RATE) {
@@ -498,7 +528,10 @@ function calculateTerminalValue(
     }
     const perpetuity = (finalCashFlow * (1 + TERMINAL_GROWTH_RATE)) / (wacc - TERMINAL_GROWTH_RATE);
     const exitMult = finalCashFlow * exitMultiple;
-    const average = (perpetuity + exitMult) / 2;
+
+    // v6: growth-based weighting instead of 50/50
+    const blend = getTerminalValueBlend(phase1Growth);
+    const average = blend.perpetuityWeight * perpetuity + blend.exitWeight * exitMult;
     const gap = Math.abs(perpetuity - exitMult) / Math.min(Math.abs(perpetuity), Math.abs(exitMult));
 
     const warnings: string[] = [];
@@ -506,7 +539,7 @@ function calculateTerminalValue(
         warnings.push(`Terminal value methods differ by ${(gap * 100).toFixed(1)}% — review assumptions`);
     }
 
-    return { perpetuity, exitMult, average, gap, warnings };
+    return { perpetuity, exitMult, average, gap, blend, warnings };
 }
 
 function discountToPresent(cashFlows: number[], wacc: number): { pvs: number[]; total: number } {
@@ -527,11 +560,12 @@ function computeIntrinsicValue(
     totalDebt: number,
     cash: number,
     sharesOutstanding: number,
+    phase1Growth?: number, // v6: for growth-based TV blend
 ): { intrinsicPerShare: number; enterpriseValue: number; netDebt: number; pvCashFlows: number; pvTerminalValue: number } {
     const { total: pvCashFlows } = discountToPresent(projectedCashFlows, wacc);
 
     const finalCF = projectedCashFlows[projectedCashFlows.length - 1];
-    const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType);
+    const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType, phase1Growth);
     const pvTerminalValue = tv.average / Math.pow(1 + wacc, PROJECTION_YEARS);
 
     const enterpriseValue = pvCashFlows + pvTerminalValue;
@@ -574,7 +608,7 @@ function reverseImpliedGrowth(
 
         const { total: pvCF } = discountToPresent(projValues, wacc);
         const finalCF = projValues[projValues.length - 1];
-        const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType);
+        const tv = calculateTerminalValue(finalCF, wacc, exitMultiple, multipleType, mid);
         const pvTV = tv.average / Math.pow(1 + wacc, PROJECTION_YEARS);
         const ev = pvCF + pvTV;
 
@@ -827,7 +861,7 @@ function runSensitivityAnalysis(
         const w = baseWacc + delta;
         const proj = projectCashFlows(baseValue, phase1Rate, phase2Rate, baseYear);
         const projValues = proj.map(p => p.value);
-        const { intrinsicPerShare } = computeIntrinsicValue(projValues, w, exitMultiple, multipleType, totalDebt, cash, shares);
+        const { intrinsicPerShare } = computeIntrinsicValue(projValues, w, exitMultiple, multipleType, totalDebt, cash, shares, phase1Rate);
         const ud = currentPrice > 0 ? (intrinsicPerShare / currentPrice) - 1 : 0;
         const label = delta < 0 ? 'Optimistic (Lower WACC)' : delta === 0 ? 'Base Case' : 'Conservative (Higher WACC)';
         return { scenario: label, wacc: w, intrinsicValue: intrinsicPerShare, upsideDownside: ud };
@@ -842,7 +876,7 @@ function runSensitivityAnalysis(
     const growthScenarios = growthDeltas.map(gd => {
         const proj = projectCashFlows(baseValue, gd.p1, gd.p2, baseYear);
         const projValues = proj.map(p => p.value);
-        const { intrinsicPerShare } = computeIntrinsicValue(projValues, baseWacc, exitMultiple, multipleType, totalDebt, cash, shares);
+        const { intrinsicPerShare } = computeIntrinsicValue(projValues, baseWacc, exitMultiple, multipleType, totalDebt, cash, shares, gd.p1);
         const ud = currentPrice > 0 ? (intrinsicPerShare / currentPrice) - 1 : 0;
         return { scenario: gd.label, phase1Growth: gd.p1, phase2Growth: gd.p2, intrinsicValue: intrinsicPerShare, upsideDownside: ud };
     });
@@ -858,7 +892,9 @@ function runSensitivityAnalysis(
         const finalCF = projValues[projValues.length - 1];
         const adjustedTV = (finalCF * (1 + tg)) / (baseWacc - tg);
         const exitTV = finalCF * exitMultiple;
-        const avgTV = (adjustedTV + exitTV) / 2;
+        // v6: use growth-based TV blend instead of 50/50
+        const tvBlend = getTerminalValueBlend(phase1Rate);
+        const avgTV = tvBlend.perpetuityWeight * adjustedTV + tvBlend.exitWeight * exitTV;
         const pvTV = avgTV / Math.pow(1 + baseWacc, PROJECTION_YEARS);
         const ev = pvCF + pvTV;
         const netDebt = totalDebt - cash;
@@ -899,7 +935,7 @@ function calculateEffectiveTaxRate(statements: FinancialStatement[]): number {
 export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const startTime = Date.now();
     const sym = symbol.toUpperCase().trim();
-    console.log(`\n📈 [DCF v5] Starting DCF analysis for ${sym}...`);
+    console.log(`\n📈 [DCF v6] Starting DCF analysis for ${sym}...`);
 
     // ─── Step 1: Data Collection ─────────────────────
     console.log(`📊 [DCF] Step 1: Collecting data...`);
@@ -916,16 +952,22 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         );
     }
 
-    // Sector exclusion: DCF not appropriate for financial institutions (v5)
-    const EXCLUDED_SECTORS = ['Financial Services', 'Financials'];
-    if (EXCLUDED_SECTORS.includes(overview.sector)) {
+    // Sector exclusion: DCF not appropriate for financial institutions / REITs (v6: case-insensitive + industry)
+    const sectorLower = (overview.sector || '').toLowerCase();
+    const industryLower = (overview.industry || '').toLowerCase();
+    const isExcludedSector = ['financial', 'financials', 'financial services']
+        .some(s => sectorLower.includes(s));
+    const isExcludedIndustry = ['bank', 'insurance', 'capital markets', 'reit']
+        .some(s => industryLower.includes(s));
+    if (isExcludedSector || isExcludedIndustry) {
         throw new APIError(
             `DCF analysis is not the appropriate valuation framework for ${overview.name} (${sym}). ` +
-            `Financial institutions (sector: ${overview.sector}) are typically valued using ` +
-            `Price/Tangible Book Value, Return on Equity analysis, and Dividend Discount Models. ` +
-            `Bank cash flows are dominated by loan origination, deposit flows, and trading activity, ` +
-            `making traditional FCF-based DCF unreliable.`,
-            { symbol: sym, sector: overview.sector }
+            `Financial institutions and REITs (sector: ${overview.sector}, industry: ${overview.industry}) ` +
+            `are typically valued using Price/Tangible Book Value, Return on Equity analysis, ` +
+            `and Dividend Discount Models. Their cash flows are dominated by loan origination, ` +
+            `deposit flows, property depreciation, and trading activity, making traditional ` +
+            `FCF-based DCF unreliable.`,
+            { symbol: sym, sector: overview.sector, industry: overview.industry }
         );
     }
 
@@ -1102,6 +1144,10 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             console.log(`📊 [DCF] Buyback fallback from overview: yield=${(fallbackYield * 100).toFixed(2)}%`);
         }
     }
+    // v6: Diagnostic buyback yield logging
+    console.log(`📊 [DCF] Buyback yield: ${(buybackResult.yield * 100).toFixed(2)}% | ` +
+        `Current shares: ${buybackResult.currentShares?.toLocaleString() ?? 'N/A'} | ` +
+        `Prior shares: ${buybackResult.priorShares?.toLocaleString() ?? 'N/A'}`);
     const organicGrowth = composite.rate;
     const effectivePerShareGrowth = composite.rate + buybackResult.yield;
 
@@ -1144,18 +1190,28 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             compositeWeight = 0.25;
             recencyWeight = 0.75;
             console.log(`📊 [DCF] Inflection [${recency.inflection}] + low trailing (${(composite.rate * 100).toFixed(1)}%): using 25/75 blend`);
+        } else if (isInflecting && composite.rate >= 0.12) {
+            // Strong trailing growth (GOOGL case): very conservative + cap recency (v6)
+            compositeWeight = 0.65;
+            recencyWeight = 0.35;
+            console.log(`📊 [DCF] Inflection [${recency.inflection}] + strong trailing (${(composite.rate * 100).toFixed(1)}%): using 65/35 blend + 1.5× recency cap`);
         } else if (isInflecting && !trailingIsLow) {
-            // Already-growing company with hot quarters (GOOGL case): conservative
+            // Moderate trailing (7-12%): standard conservative
             compositeWeight = 0.55;
             recencyWeight = 0.45;
-            console.log(`📊 [DCF] Inflection [${recency.inflection}] but trailing already strong (${(composite.rate * 100).toFixed(1)}%): using 55/45 blend`);
+            console.log(`📊 [DCF] Inflection [${recency.inflection}] + moderate trailing (${(composite.rate * 100).toFixed(1)}%): using 55/45 blend`);
         } else {
             // Stable: balanced blend
             compositeWeight = 0.55;
             recencyWeight = 0.45;
         }
-        finalGrowthRate = compositeWeight * effectivePerShareGrowth + recencyWeight * recency.adjustedRate;
-        console.log(`📊 [DCF] Growth: composite=${(effectivePerShareGrowth * 100).toFixed(1)}%, recency=${(recency.adjustedRate * 100).toFixed(1)}%, blended=${(finalGrowthRate * 100).toFixed(1)}%`);
+        // v6: Cap recency at 1.5× trailing for strong-trailing companies to prevent overshoot
+        const effectiveRecency = (composite.rate >= 0.12)
+            ? Math.min(recency.adjustedRate, composite.rate * 1.5)
+            : recency.adjustedRate;
+        finalGrowthRate = compositeWeight * effectivePerShareGrowth + recencyWeight * effectiveRecency;
+        console.log(`📊 [DCF] Growth: composite=${(effectivePerShareGrowth * 100).toFixed(1)}%, recency=${(recency.adjustedRate * 100).toFixed(1)}%` +
+            `${composite.rate >= 0.12 ? ` (capped to ${(effectiveRecency * 100).toFixed(1)}%)` : ''}, blended=${(finalGrowthRate * 100).toFixed(1)}%`);
     }
     // Cap at MAX_GROWTH_CAP
     finalGrowthRate = Math.min(finalGrowthRate, MAX_GROWTH_CAP);
@@ -1203,14 +1259,21 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         multipleType = 'P/E';
     }
 
-    const tv = calculateTerminalValue(finalCashFlow, effectiveWacc, exitMultiple, multipleType);
+    const tv = calculateTerminalValue(finalCashFlow, effectiveWacc, exitMultiple, multipleType, growth.phase1);
+
+    // v6: Debug logging for terminal value path
+    console.log(`[DCF-DEBUG] TV: perpetuity=$${(tv.perpetuity / 1e9).toFixed(1)}B, ` +
+        `exit=$${(tv.exitMult / 1e9).toFixed(1)}B (${exitMultiple.toFixed(1)}×), ` +
+        `blend=${JSON.stringify(tv.blend)}, final=$${(tv.average / 1e9).toFixed(1)}B, ` +
+        `year10FCF=$${(finalCashFlow / 1e9).toFixed(1)}B, ` +
+        `perpetuity_impliedMultiple=${(tv.perpetuity / finalCashFlow).toFixed(1)}×`);
 
     // ─── Step 8: Intrinsic value (shared path) ───────
     console.log(`📊 [DCF] Step 8: Computing intrinsic value...`);
 
     const valuation = computeIntrinsicValue(
         projectedValues, effectiveWacc, exitMultiple, multipleType,
-        totalDebt, cash, sharesOutstanding,
+        totalDebt, cash, sharesOutstanding, growth.phase1,
     );
 
     const upsideDownside = currentPrice > 0 ? (valuation.intrinsicPerShare / currentPrice) - 1 : 0;

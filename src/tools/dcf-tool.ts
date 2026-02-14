@@ -44,7 +44,7 @@ function formatDCFOutput(result: DCFResult): string {
 
     // ── Header ──────────────────────────────────────
     output += `\n${'═'.repeat(70)}\n`;
-    output += `  📊 DCF ANALYSIS v5: ${metadata.companyName} (${metadata.ticker})\n`;
+    output += `  📊 DCF ANALYSIS v6: ${metadata.companyName} (${metadata.ticker})\n`;
     output += `${'═'.repeat(70)}\n`;
     output += `  Date: ${metadata.analysisDate} | Method: ${metadata.dcfMethod === 'fcf_based' ? 'Free Cash Flow' : 'Earnings-Based'}\n`;
     output += `  Data Source: ${metadata.dataSource}\n`;
