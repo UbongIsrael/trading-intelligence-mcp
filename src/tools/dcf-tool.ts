@@ -44,7 +44,7 @@ function formatDCFOutput(result: DCFResult): string {
 
     // ── Header ──────────────────────────────────────
     output += `\n${'═'.repeat(70)}\n`;
-    output += `  📊 DCF ANALYSIS v3: ${metadata.companyName} (${metadata.ticker})\n`;
+    output += `  📊 DCF ANALYSIS v5: ${metadata.companyName} (${metadata.ticker})\n`;
     output += `${'═'.repeat(70)}\n`;
     output += `  Date: ${metadata.analysisDate} | Method: ${metadata.dcfMethod === 'fcf_based' ? 'Free Cash Flow' : 'Earnings-Based'}\n`;
     output += `  Data Source: ${metadata.dataSource}\n`;
@@ -244,6 +244,12 @@ function formatDCFOutput(result: DCFResult): string {
     output += `\n  Terminal Growth Sensitivity:\n`;
     for (const s of sensitivityAnalysis.terminalGrowthSensitivity) {
         output += `    Terminal Growth ${fmtPct(s.terminalGrowth)}: IV $${s.intrinsicValue.toFixed(2)} (${s.impactVsBase >= 0 ? '+' : ''}${fmtPct(s.impactVsBase)} vs base)\n`;
+    }
+
+    if (sensitivityAnalysis.fairValueWacc) {
+        output += `\n  🎯 Fair-Value WACC (break-even discount rate):\n`;
+        output += `    The market price is justified at WACC = ${(sensitivityAnalysis.fairValueWacc * 100).toFixed(2)}%`;
+        output += ` (model uses ${(result.waccCalculation.wacc * 100).toFixed(2)}%)\n`;
     }
 
     // ── Risk Factors ────────────────────────
