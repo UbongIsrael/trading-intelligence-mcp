@@ -76,7 +76,8 @@ export interface FinancialStatement {
     currentAssets?: number;
     currentLiabilities?: number;
     cash?: number;
-    sharesOutstanding?: number;
+    sharesOutstanding?: number; // From Balance Sheet
+    weightedAverageShares?: number; // From Income Statement (v7 fallback)
 
     // Income Statement
     revenue?: number;
@@ -158,6 +159,8 @@ interface AlphaVantageIncomeStatement {
         interestExpense: string;
         incomeTaxExpense: string;
         incomeBeforeTax: string;
+        weightedAverageShsOut?: string;
+        weightedAverageShsOutDil?: string;
     }>;
     quarterlyReports?: Array<{
         fiscalDateEnding: string;
@@ -170,6 +173,8 @@ interface AlphaVantageIncomeStatement {
         interestExpense: string;
         incomeTaxExpense: string;
         incomeBeforeTax: string;
+        weightedAverageShsOut?: string;
+        weightedAverageShsOutDil?: string;
     }>;
 }
 
@@ -488,6 +493,13 @@ async function _fetchCompanyOverviewFromAPI(symbol: string): Promise<CompanyOver
         sharesOutstanding: parseNumber(response.SharesOutstanding),
     };
 
+    // v7 Debug: Log the raw shares value to diagnose why AAPL/MSFT return undefined
+    if (symbol === 'AAPL' || symbol === 'MSFT') {
+        console.log(`🔍 [Alpha Vantage] ${symbol} Overview shares raw: "${response.SharesOutstanding}" -> parsed: ${overview.sharesOutstanding}`);
+    }
+
+    return overview;
+
     const responseTime = Date.now() - startTime;
     console.log(`✅ [Alpha Vantage] Fetched ${symbol} overview from API in ${responseTime}ms`);
 
@@ -694,6 +706,9 @@ async function _fetchFinancialStatementsFromAPI(
             cash: balance ? parseNumber(balance.cashAndCashEquivalentsAtCarryingValue) : undefined,
             sharesOutstanding: balance ? parseNumber(balance.commonStockSharesOutstanding) : undefined,
 
+            // v7: Weighted average shares from income statement as fallback
+            weightedAverageShares: income ? parseNumber(income.weightedAverageShsOut) : undefined,
+
             // Income Statement
             revenue,
             costOfRevenue: parseNumber(income.costOfRevenue),
@@ -850,6 +865,13 @@ export async function fetchFullFundamentals(symbol: string): Promise<{
             metrics,
             timestamp: new Date(),
         };
+
+        // v7 Debug: Log if shares missing from Overview
+        if (!result.overview.sharesOutstanding && (symbol === 'AAPL' || symbol === 'MSFT')) {
+            console.log(`⚠️ [Alpha Vantage] ${symbol} Overview shares missing. Raw: "${overview.sharesOutstanding}"`);
+        }
+
+        return result;
 
         const responseTime = Date.now() - startTime;
         console.log(`✅ [Alpha Vantage] Fetched full fundamentals for ${symbol} in ${responseTime}ms`);

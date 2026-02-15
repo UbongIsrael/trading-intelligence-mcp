@@ -32,7 +32,7 @@ const TERMINAL_GROWTH_RATE = 0.025;
 const DEFAULT_EXIT_PE = 20;
 const PROJECTION_YEARS = 10;
 const PHASE_1_YEARS = 5;
-const MAX_GROWTH_CAP = 0.50;
+const MAX_GROWTH_CAP = 0.40; // v7: Phase 1 Hard Cap (was 0.50)
 const MIN_LONG_TERM_GROWTH = 0.03;
 const MAX_LONG_TERM_GROWTH = 0.20;
 const SENSITIVITY_WACC_DELTA = 0.02;
@@ -333,7 +333,14 @@ function computeCompositeGrowth(
     const signals: Array<{ signal: string; weight: number; value: number | null }> = [
         { signal: 'Revenue CAGR (3yr)', weight: weights.revenue, value: revCagr },
         { signal: 'Operating Income CAGR (3yr)', weight: weights.operatingIncome, value: opIncomeCagr },
-        { signal: 'Normalized FCF CAGR (3yr)', weight: weights.normalizedFCF, value: normalizedFcfCagr },
+        // v7: Cap normalized FCF growth if capex normalization is active to prevent inflation
+        {
+            signal: 'Normalized FCF CAGR (3yr)',
+            weight: weights.normalizedFCF,
+            value: (capexAnomaly && normalizedFcfCagr && revCagr && normalizedFcfCagr > revCagr * 1.5)
+                ? revCagr * 1.5
+                : normalizedFcfCagr
+        },
         { signal: 'Owner Earnings CAGR (3yr)', weight: weights.ownerEarnings, value: ownerEarningsCagr },
     ];
 
@@ -676,8 +683,17 @@ function computeNetBuybackYield(
     statements: FinancialStatement[],
 ): { yield: number; currentShares?: number; priorShares?: number } {
     const sorted = [...statements].sort((a, b) => b.fiscalYear - a.fiscalYear);
-    const current = sorted[0]?.sharesOutstanding;
-    const prior = sorted[1]?.sharesOutstanding;
+    let current = sorted[0]?.sharesOutstanding;
+    let prior = sorted[1]?.sharesOutstanding;
+
+    // v7: Fallback to weighted average shares from income statement if BS shares are missing
+    if (!current || prior === undefined || prior <= 0) {
+        if (sorted[0]?.weightedAverageShares && sorted[1]?.weightedAverageShares) {
+            current = sorted[0].weightedAverageShares;
+            prior = sorted[1].weightedAverageShares;
+            // console.log(`ℹ️ [DCF] Using weighted average shares for buyback yield (BS shares missing)`);
+        }
+    }
 
     if (!prior || !current || prior <= 0) {
         return { yield: 0 };
@@ -686,6 +702,15 @@ function computeNetBuybackYield(
     // Positive = buyback (shrinkage), Negative = dilution
     const buybackYield = (prior - current) / prior;
     return { yield: buybackYield, currentShares: current, priorShares: prior };
+}
+
+// v7: Helper to calculate volatility (Coefficient of Variation)
+function calculateVolatility(values: number[]): number {
+    if (values.length < 2) return 0;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    if (Math.abs(mean) < 1e-6) return 0; // Avoid division by zero
+    const variance = values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+    return Math.sqrt(variance) / Math.abs(mean);
 }
 
 /**
@@ -775,6 +800,24 @@ function computeRecencyAdjustedGrowth(
     // Growth cap guardrail: don't exceed the TTM rate itself (prevents extrapolation)
     // The weighted average already dampens extreme values; no need for double-capping
     adjustedRate = Math.min(adjustedRate, ttmRevenueGrowth);
+
+    // v7: Recency Variance Gate
+    // If quarterly FCF is highly volatile but annual trend is steady, dampen recency weight
+    // Note: We need FCF data here. Since we only have 'revenue' in the quarterly statements currently,
+    // we use Revenue Volatility as a proxy OR we need to pass FCF data.
+    // Given the constraint, we will implement a "Revenue Stability Check" here.
+    // If quarterly revenue volatility is high (>5% CV), we reduce recency confidence.
+
+    // Calculate Quarterly Revenue Volatility
+    const qRevenues = quarterlyStatements.slice(0, 4).map(q => q.revenue).filter(r => r !== undefined && r > 0) as number[];
+    const qVol = calculateVolatility(qRevenues);
+
+    if (qVol > 0.05) { // >5% quarterly variance implies seasonality or lumpiness
+        // console.log(`📉 [DCF] High quarterly volatility (${(qVol*100).toFixed(1)}%). Dampening recency.`);
+        // Dampen: Shift 20% weight from TTM to trailing average
+        const shift = 0.20;
+        adjustedRate = (adjustedRate * (1 - shift)) + (trailingAvg * shift);
+    }
 
     return { quarterlyGrowthUsed: true, inflection, ttmGrowthRate: ttmRevenueGrowth, weights, adjustedRate };
 }

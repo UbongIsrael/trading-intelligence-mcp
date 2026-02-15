@@ -92,9 +92,9 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  ${capexAnalysis.interpretation}\n`;
 
     // ── Growth Analysis (Multi-Signal) ──────
-    output += `\n${'─'.repeat(70)}\n`;
-    output += `  📈 GROWTH ANALYSIS (Multi-Signal Composite)\n`;
-    output += `${'─'.repeat(70)}\n`;
+    output += `\n${'═'.repeat(70)}\n`;
+    output += `  📈 DCF Analysis v7 (Growth & Buyback Fixes)\n`;
+    output += `${'═'.repeat(70)}\n`;
     output += `  Individual Growth Signals:\n`;
     output += `    Revenue CAGR (3yr):        ${fmtPct(growthAnalysis.historicalGrowthRates.revenueCagr3yr)}\n`;
     output += `    OpIncome CAGR (3yr):       ${fmtPct(growthAnalysis.historicalGrowthRates.opIncomeCagr3yr)}\n`;
@@ -103,7 +103,7 @@ function formatDCFOutput(result: DCFResult): string {
     output += `    Raw FCF CAGR (3yr):        ${fmtPct(growthAnalysis.historicalGrowthRates.rawFcfCagr3yr)} ${growthAnalysis.compositeGrowth.capexAdjusted ? '⚠️ capex-distorted' : ''}\n`;
     output += `    Trend:                     ${growthAnalysis.historicalGrowthRates.growthTrend}\n\n`;
 
-    output += `  Composite Growth Rate: ${fmtPct(growthAnalysis.compositeGrowth.rate)}${growthAnalysis.compositeGrowth.capexAdjusted ? ' (capex-adjusted weights)' : ''}\n`;
+    output += `  Composite Growth Rate (Signals): ${fmtPct(growthAnalysis.compositeGrowth.rate)}${growthAnalysis.compositeGrowth.capexAdjusted ? ' (capex-adjusted weights)' : ''}\n`;
     output += `  Signal Weights:\n`;
     for (const s of growthAnalysis.compositeGrowth.signalBreakdown) {
         const val = s.value !== null ? fmtPct(s.value) : 'N/A (excluded)';
@@ -111,7 +111,8 @@ function formatDCFOutput(result: DCFResult): string {
     }
 
     output += `\n  Projection Assumptions:\n`;
-    output += `    Phase 1 (${growthAnalysis.projectionAssumptions.phase1.years}): ${fmtPct(growthAnalysis.projectionAssumptions.phase1.growthRate)}\n`;
+    output += `    Final Blended Growth Rate: ${fmtPct(growthAnalysis.projectionAssumptions.phase1.growthRate)} (Used for Phase 1)\n`;
+    output += `    Phase 1 (${growthAnalysis.projectionAssumptions.phase1.years}yr): ${fmtPct(growthAnalysis.projectionAssumptions.phase1.growthRate)}\n`;
     output += `      ↳ ${growthAnalysis.projectionAssumptions.phase1.rationale}\n`;
     output += `    Phase 2 (${growthAnalysis.projectionAssumptions.phase2.years}): ${fmtPct(growthAnalysis.projectionAssumptions.phase2.growthRate)}\n`;
     output += `      ↳ ${growthAnalysis.projectionAssumptions.phase2.rationale}\n`;
