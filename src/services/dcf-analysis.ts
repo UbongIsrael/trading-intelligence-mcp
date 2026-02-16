@@ -1636,5 +1636,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
     };
 
+    console.log(`✅ [DCF] Analysis complete for ${symbol}. Intrinsic Value: $${valuation.intrinsicPerShare.toFixed(2)}`);
     return result;
 }

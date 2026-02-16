@@ -498,8 +498,6 @@ async function _fetchCompanyOverviewFromAPI(symbol: string): Promise<CompanyOver
         console.log(`🔍 [Alpha Vantage] ${symbol} Overview shares raw: "${response.SharesOutstanding}" -> parsed: ${overview.sharesOutstanding}`);
     }
 
-    return overview;
-
     const responseTime = Date.now() - startTime;
     console.log(`✅ [Alpha Vantage] Fetched ${symbol} overview from API in ${responseTime}ms`);
 
@@ -870,8 +868,6 @@ export async function fetchFullFundamentals(symbol: string): Promise<{
         if (!result.overview.sharesOutstanding && (symbol === 'AAPL' || symbol === 'MSFT')) {
             console.log(`⚠️ [Alpha Vantage] ${symbol} Overview shares missing. Raw: "${overview.sharesOutstanding}"`);
         }
-
-        return result;
 
         const responseTime = Date.now() - startTime;
         console.log(`✅ [Alpha Vantage] Fetched full fundamentals for ${symbol} in ${responseTime}ms`);
