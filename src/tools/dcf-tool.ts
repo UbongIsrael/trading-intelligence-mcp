@@ -192,6 +192,15 @@ export function registerDCFAnalysisTool(): void {
             'Uses historical financial data from Alpha Vantage.',
         category: 'fundamental',
         version: '4.0.0',
+        _meta: {
+            rateLimit: {
+                maxRequestsPerMinute: 5,
+                cooldownMs: 3000,
+                maxConcurrency: 1,
+                supportsBulk: false,
+                notes: "Alpha Vantage free tier: use snapshot methods before per-asset loops to avoid API exhaustion."
+            }
+        },
         inputSchema: {
             type: 'object' as const,
             properties: {
@@ -242,6 +251,15 @@ export function registerDCFAnalysisTool(): void {
             'or as a sanity check. Only requires 3 API calls.',
         category: 'fundamental',
         version: '1.0.0',
+        _meta: {
+            rateLimit: {
+                maxRequestsPerMinute: 5,
+                cooldownMs: 3000,
+                maxConcurrency: 1,
+                supportsBulk: false,
+                notes: "Alpha Vantage free tier: use snapshot methods before per-asset loops to avoid API exhaustion."
+            }
+        },
         inputSchema: {
             type: 'object' as const,
             properties: {

@@ -45,6 +45,7 @@ export interface ToolDefinition {
   version: string;
   inputSchema: any;
   outputSchema?: any;
+  _meta?: Record<string, unknown>;
   handler: (args: any, extra?: any) => Promise<any>;
 }
 
@@ -124,6 +125,7 @@ export function setupServerHandlers(server: Server): void {
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema,
+        ...(tool._meta && { _meta: tool._meta }),
       }))
     };
   });
