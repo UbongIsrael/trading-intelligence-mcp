@@ -178,18 +178,15 @@ function selectGrowthRate(
         }
     }
 
-    // Method 2: Analyst consensus — implied growth from estimated vs reported EPS
-    if (earningsData && earningsData.length >= 5) {
-        // TTM EPS = sum of last 4 reported
-        const ttmEPS = earningsData.slice(0, 4).reduce((sum, q) => sum + (q.reportedEPS || 0), 0);
-        // Find estimatedEPS from the most recent quarter
-        const latestEstimate = earningsData.find(q => q.estimatedEPS !== undefined && q.estimatedEPS > 0);
-        if (latestEstimate && latestEstimate.estimatedEPS && ttmEPS > 0) {
-            const estimatedAnnualEPS = latestEstimate.estimatedEPS * 4;
-            const analystGrowth = (estimatedAnnualEPS / ttmEPS) - 1;
-            if (analystGrowth > 0 && isFinite(analystGrowth)) {
-                const clamped = Math.max(0.02, Math.min(analystGrowth, 0.35));
-                return { rate: clamped, source: 'analyst', raw: revenueCAGR };
+    // Method 2: Analyst consensus — TTM EPS YoY growth (requires 8 quarters of data)
+    if (earningsData && earningsData.length >= 8) {
+        const ttmNow = earningsData.slice(0, 4).reduce((sum, q) => sum + (q.reportedEPS || 0), 0);
+        const ttm1yrAgo = earningsData.slice(4, 8).reduce((sum, q) => sum + (q.reportedEPS || 0), 0);
+        if (ttmNow > 0 && ttm1yrAgo > 0) {
+            const yoyGrowth = (ttmNow / ttm1yrAgo) - 1;
+            if (isFinite(yoyGrowth) && yoyGrowth > 0) {
+                const clamped = Math.max(0.02, Math.min(yoyGrowth, 0.35));
+                return { rate: clamped, source: 'analyst_yoy', raw: revenueCAGR };
             }
         }
     }
@@ -483,12 +480,15 @@ export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
         );
     }
 
-    // Growth rate from analyst estimates or default
-    const latestEstimate = earningsData.find(q => q.epsEstimate !== undefined && q.epsEstimate > 0);
+    // Growth rate: compare TTM EPS now vs TTM EPS one year ago (true YoY)
+    const ttmEPS_1yrAgo = earningsData
+        .slice(4, 8)
+        .reduce((sum, q) => sum + (q.epsActual ?? 0), 0);
+
     let growthRate: number;
-    if (latestEstimate && latestEstimate.epsEstimate) {
-        const estimatedAnnualEPS = latestEstimate.epsEstimate * 4;
-        growthRate = Math.max(0.02, Math.min((estimatedAnnualEPS / ttmEPS) - 1, 0.35));
+    if (ttmEPS_1yrAgo > 0 && ttmEPS > 0) {
+        const historicalGrowth = (ttmEPS / ttmEPS_1yrAgo) - 1;
+        growthRate = Math.max(0.02, Math.min(historicalGrowth, 0.35));
     } else {
         growthRate = 0.05; // Fallback
     }
