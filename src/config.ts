@@ -86,6 +86,10 @@ export const apiConfig = {
   },
   alphaVantage: {
     apiKey: process.env.ALPHA_VANTAGE_API_KEY,
+    apiKeys: process.env.ALPHA_VANTAGE_API_KEYS
+      ? process.env.ALPHA_VANTAGE_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
+      : [],
+    premiumKey: process.env.ALPHA_VANTAGE_PREMIUM_KEY?.trim() || null,
     baseUrl: 'https://www.alphavantage.co/query',
   },
   coinGecko: {

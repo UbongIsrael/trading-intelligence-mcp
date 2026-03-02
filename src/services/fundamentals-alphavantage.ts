@@ -226,67 +226,12 @@ interface AlphaVantageCashFlow {
     }>;
 }
 
-import { Mutex } from '../utils/mutex.js';
+import { getKeyPool } from './api-key-pool.js';
 
 /**
- * Rate limiting and quota management
+ * Request timeout for API calls
  */
-const RATE_LIMIT_DELAY = 12000; // 12 seconds = 5 requests/minute (free tier limit)
 const REQUEST_TIMEOUT = 10000;  // 10 seconds timeout
-const DAILY_LIMIT = 25;         // Free tier daily limit
-const DAILY_LIMIT_WARNING = 20; // Warn when approaching limit
-
-// Mutex to enforce sequential requests
-const requestMutex = new Mutex();
-
-let dailyRequestCount = 0;
-let lastResetDate = new Date().toDateString();
-let lastRequestTime = 0;
-
-/**
- * Check and reset daily counter if new day
- */
-function checkAndResetCounter(): void {
-    const today = new Date().toDateString();
-    if (today !== lastResetDate) {
-        console.log(`🔄 [Alpha Vantage] Daily counter reset (was ${dailyRequestCount}/${DAILY_LIMIT})`);
-        dailyRequestCount = 0;
-        lastResetDate = today;
-    }
-}
-
-/**
- * Respect rate limit (5 requests per minute)
- */
-async function respectRateLimit(): Promise<void> {
-    const now = Date.now();
-    const timeSinceLastRequest = now - lastRequestTime;
-
-    if (timeSinceLastRequest < RATE_LIMIT_DELAY) {
-        const waitTime = RATE_LIMIT_DELAY - timeSinceLastRequest;
-        console.log(`⏳ [Alpha Vantage] Rate limiting: waiting ${Math.round(waitTime / 1000)}s`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-    }
-
-    lastRequestTime = Date.now();
-}
-
-/**
- * Get Alpha Vantage API key
- */
-function getApiKey(): string {
-    const apiKey = apiConfig.alphaVantage?.apiKey;
-    if (!apiKey || apiKey === 'demo') {
-        throw new APIError(
-            'Alpha Vantage API key not configured. Set ALPHA_VANTAGE_API_KEY environment variable.',
-            {
-                suggestion: 'Get a free API key at https://www.alphavantage.co/support/#api-key',
-                code: 'MISSING_API_KEY'
-            }
-        );
-    }
-    return apiKey;
-}
 
 /**
  * Normalize stock symbol
@@ -326,45 +271,27 @@ function parseNumber(value: string | number | undefined): number | undefined {
 }
 
 /**
- * Make API request to Alpha Vantage with rate limiting and quota management
+ * Make API request to Alpha Vantage with rate limiting and quota management.
+ * Uses the key pool for parallel requests across different keys.
  */
 async function makeAPICall<T>(
     functionName: string,
     symbol: string,
     additionalParams: Record<string, string> = {}
 ): Promise<T> {
-    // Use mutex to ensure sequential execution and strict rate limiting
-    return await requestMutex.dispatch(async () => {
-        // Check and reset counter if new day
-        checkAndResetCounter();
+    const pool = getKeyPool();
+    const managedKey = pool.acquireKey();
 
-        // Warn if approaching limit
-        if (dailyRequestCount >= DAILY_LIMIT_WARNING) {
-            console.warn(`⚠️ [Alpha Vantage] ${dailyRequestCount}/${DAILY_LIMIT} daily requests used`);
-        }
+    // Use the key's per-key mutex to serialize requests on the SAME key,
+    // while allowing concurrent requests on DIFFERENT keys.
+    return await managedKey.mutex.dispatch(async () => {
+        // Wait for this key's rate limit window
+        await pool.waitForRateLimit(managedKey);
 
-        // Check if daily limit reached
-        if (dailyRequestCount >= DAILY_LIMIT) {
-            throw new APIError(
-                `Alpha Vantage daily limit reached (${dailyRequestCount}/${DAILY_LIMIT}). Data will refresh tomorrow or upgrade to Premium tier.`,
-                {
-                    code: 'DAILY_LIMIT_REACHED',
-                    limit: DAILY_LIMIT,
-                    current: dailyRequestCount,
-                    upgradeUrl: 'https://www.alphavantage.co/premium/',
-                    resetTime: new Date(new Date().setHours(24, 0, 0, 0))
-                }
-            );
-        }
-
-        // Apply rate limiting
-        await respectRateLimit();
-
-        const apiKey = getApiKey();
         const url = new URL(apiConfig.alphaVantage.baseUrl);
         url.searchParams.append('function', functionName);
         url.searchParams.append('symbol', symbol);
-        url.searchParams.append('apikey', apiKey);
+        url.searchParams.append('apikey', managedKey.key);
 
         for (const [key, value] of Object.entries(additionalParams)) {
             url.searchParams.append(key, value);
@@ -417,9 +344,8 @@ async function makeAPICall<T>(
                 );
             }
 
-            // Increment counter AFTER successful call
-            dailyRequestCount++;
-            console.log(`📊 [Alpha Vantage] Request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
+            // Record successful call on this key
+            pool.recordSuccess(managedKey);
 
             return data as T;
 
@@ -902,60 +828,57 @@ export async function fetchTreasuryYield(): Promise<number> {
             return (cached as any).value;
         }
 
-        // Special API call - TREASURY_YIELD doesn't use symbol param
-        // We use makeAPICall with an empty symbol and override via additionalParams
-        const apiKey = getApiKey();
-        const url = new URL(apiConfig.alphaVantage.baseUrl);
-        url.searchParams.append('function', 'TREASURY_YIELD');
-        url.searchParams.append('interval', 'monthly');
-        url.searchParams.append('maturity', '10year');
-        url.searchParams.append('apikey', apiKey);
+        // Use key pool for the API call
+        const pool = getKeyPool();
+        const managedKey = pool.acquireKey();
 
-        await respectRateLimit();
-        checkAndResetCounter();
+        return await managedKey.mutex.dispatch(async () => {
+            await pool.waitForRateLimit(managedKey);
 
-        if (dailyRequestCount >= DAILY_LIMIT) {
-            throw new APIError('Alpha Vantage daily limit reached', { code: 'DAILY_LIMIT_REACHED' });
-        }
+            const url = new URL(apiConfig.alphaVantage.baseUrl);
+            url.searchParams.append('function', 'TREASURY_YIELD');
+            url.searchParams.append('interval', 'monthly');
+            url.searchParams.append('maturity', '10year');
+            url.searchParams.append('apikey', managedKey.key);
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
-        const response = await fetch(url.toString(), {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' },
-            signal: controller.signal,
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new APIError(`Treasury yield API error: ${response.status}`, { status: response.status });
+            }
+
+            const data = await response.json() as any;
+            pool.recordSuccess(managedKey);
+
+            // Extract most recent yield value
+            if (!data.data || data.data.length === 0) {
+                console.warn('⚠️ No treasury yield data available, using default 4.25%');
+                return 0.0425;
+            }
+
+            const yieldValue = parseFloat(data.data[0].value);
+            if (isNaN(yieldValue)) {
+                console.warn('⚠️ Invalid treasury yield value, using default 4.25%');
+                return 0.0425;
+            }
+
+            const riskFreeRate = yieldValue / 100; // Convert from percentage
+
+            // Cache result
+            await cache.fundamentals.set(cacheKey, 'treasury', { value: riskFreeRate } as any);
+            console.log(`📦 [Cache] Stored treasury yield: ${(riskFreeRate * 100).toFixed(2)}%`);
+
+            return riskFreeRate;
         });
-
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-            throw new APIError(`Treasury yield API error: ${response.status}`, { status: response.status });
-        }
-
-        const data = await response.json() as any;
-        dailyRequestCount++;
-        console.log(`📊 [Alpha Vantage] Treasury yield request successful (${dailyRequestCount}/${DAILY_LIMIT} daily)`);
-
-        // Extract most recent yield value
-        if (!data.data || data.data.length === 0) {
-            console.warn('⚠️ No treasury yield data available, using default 4.25%');
-            return 0.0425;
-        }
-
-        const yieldValue = parseFloat(data.data[0].value);
-        if (isNaN(yieldValue)) {
-            console.warn('⚠️ Invalid treasury yield value, using default 4.25%');
-            return 0.0425;
-        }
-
-        const riskFreeRate = yieldValue / 100; // Convert from percentage
-
-        // Cache result
-        await cache.fundamentals.set(cacheKey, 'treasury', { value: riskFreeRate } as any);
-        console.log(`📦 [Cache] Stored treasury yield: ${(riskFreeRate * 100).toFixed(2)}%`);
-
-        return riskFreeRate;
 
     } catch (error: any) {
         if (error instanceof APIError) throw error;
@@ -1021,24 +944,24 @@ export async function fetchAnnualEarnings(symbol: string, limit: number = 10): P
  * Check if Alpha Vantage API is configured
  */
 export function isAlphaVantageConfigured(): boolean {
-    const apiKey = apiConfig.alphaVantage?.apiKey;
-    return !!apiKey && apiKey !== 'demo' && apiKey.length > 0;
+    return getKeyPool().hasKeys();
 }
 
 /**
- * Get daily usage statistics
+ * Get daily usage statistics (pool-aware)
  */
 export function getDailyUsageStats(): {
     used: number;
-    limit: number;
-    remaining: number;
+    limit: number | string;
+    remaining: number | string;
     resetTime: Date;
 } {
-    checkAndResetCounter();
+    const stats = getKeyPool().getPoolStats();
+    const totalLimit = stats.totalDailyLimit;
     return {
-        used: dailyRequestCount,
-        limit: DAILY_LIMIT,
-        remaining: DAILY_LIMIT - dailyRequestCount,
+        used: stats.totalDailyUsed,
+        limit: totalLimit,
+        remaining: typeof totalLimit === 'number' ? totalLimit - stats.totalDailyUsed : 'unlimited',
         resetTime: new Date(new Date().setHours(24, 0, 0, 0)),
     };
 }
