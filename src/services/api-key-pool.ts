@@ -233,6 +233,17 @@ export class ApiKeyPool {
     }
 
     /**
+     * Mark a key as exhausted (server-side daily limit reached).
+     * This is called when Alpha Vantage returns a daily-limit Information
+     * response, meaning their server considers this key used up even if
+     * our local counter disagrees (timezone mismatch, etc).
+     */
+    markExhausted(key: ManagedKey): void {
+        key.dailyCount = key.dailyLimit;
+        console.warn(`🚫 [Key Pool] ${key.label}: marked as EXHAUSTED (server-side daily limit reached)`);
+    }
+
+    /**
      * Record a successful API call on a key.
      */
     recordSuccess(key: ManagedKey): void {

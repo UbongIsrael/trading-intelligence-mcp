@@ -273,6 +273,10 @@ function parseNumber(value: string | number | undefined): number | undefined {
 /**
  * Make API request to Alpha Vantage with rate limiting and quota management.
  * Uses the key pool for parallel requests across different keys.
+ * 
+ * RETRY LOGIC: If Alpha Vantage server-side rejects a key (daily limit
+ * Information message or rate-limit Note), the key is marked exhausted
+ * and the request is retried with the next available key.
  */
 async function makeAPICall<T>(
     functionName: string,
@@ -280,93 +284,129 @@ async function makeAPICall<T>(
     additionalParams: Record<string, string> = {}
 ): Promise<T> {
     const pool = getKeyPool();
-    const managedKey = pool.acquireKey();
+    const triedKeys = new Set<string>();
 
-    // Use the key's per-key mutex to serialize requests on the SAME key,
-    // while allowing concurrent requests on DIFFERENT keys.
-    return await managedKey.mutex.dispatch(async () => {
-        // Wait for this key's rate limit window
-        await pool.waitForRateLimit(managedKey);
+    while (true) {
+        // acquireKey() throws DAILY_LIMIT_REACHED if all keys exhausted
+        const managedKey = pool.acquireKey();
 
-        const url = new URL(apiConfig.alphaVantage.baseUrl);
-        url.searchParams.append('function', functionName);
-        url.searchParams.append('symbol', symbol);
-        url.searchParams.append('apikey', managedKey.key);
-
-        for (const [key, value] of Object.entries(additionalParams)) {
-            url.searchParams.append(key, value);
+        // Safety: avoid infinite loop if acquireKey keeps returning same key
+        if (triedKeys.has(managedKey.key)) {
+            pool.markExhausted(managedKey);
+            continue;
         }
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+        triedKeys.add(managedKey.key);
 
         try {
-            const response = await fetch(url.toString(), {
-                method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                },
-                signal: controller.signal,
+            // Use the key's per-key mutex to serialize requests on the SAME key,
+            // while allowing concurrent requests on DIFFERENT keys.
+            return await managedKey.mutex.dispatch(async () => {
+                // Wait for this key's rate limit window
+                await pool.waitForRateLimit(managedKey);
+
+                const url = new URL(apiConfig.alphaVantage.baseUrl);
+                url.searchParams.append('function', functionName);
+                url.searchParams.append('symbol', symbol);
+                url.searchParams.append('apikey', managedKey.key);
+
+                for (const [key, value] of Object.entries(additionalParams)) {
+                    url.searchParams.append(key, value);
+                }
+
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+                try {
+                    const response = await fetch(url.toString(), {
+                        method: 'GET',
+                        headers: {
+                            'Accept': 'application/json',
+                        },
+                        signal: controller.signal,
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (!response.ok) {
+                        throw new APIError(
+                            `Alpha Vantage API error: ${response.status} ${response.statusText}`,
+                            { status: response.status, function: functionName }
+                        );
+                    }
+
+                    const data = await response.json() as Record<string, unknown>;
+
+                    // Check for Alpha Vantage error responses
+                    if (data['Error Message']) {
+                        throw new APIError(
+                            `Alpha Vantage API error: ${data['Error Message']}`,
+                            { code: 'ALPHA_VANTAGE_ERROR', response: data }
+                        );
+                    }
+
+                    // Check for rate limit note (5 calls/min)
+                    if (typeof data['Note'] === 'string' && data['Note'].includes('5 calls per minute')) {
+                        throw new APIError(
+                            'Alpha Vantage rate limit hit (5/min).',
+                            { code: 'RATE_LIMIT_HIT', retryAfter: 12000, keyLabel: managedKey.label }
+                        );
+                    }
+
+                    // Check for daily limit Information message
+                    if (typeof data['Information'] === 'string' &&
+                        (data['Information'] as string).includes('rate limit')) {
+                        throw new APIError(
+                            `Alpha Vantage daily limit: ${data['Information']}`,
+                            { code: 'KEY_DAILY_LIMIT', keyLabel: managedKey.label, response: data }
+                        );
+                    }
+
+                    // Check for other information messages (invalid symbol, no data, etc.)
+                    if (data['Information']) {
+                        throw new APIError(
+                            `Alpha Vantage: ${data['Information']}`,
+                            { code: 'NO_DATA', response: data }
+                        );
+                    }
+
+                    // Record successful call on this key
+                    pool.recordSuccess(managedKey);
+
+                    return data as T;
+
+                } catch (error: any) {
+                    if (error.name === 'AbortError') {
+                        throw new APIError(
+                            `Request timeout for Alpha Vantage ${functionName}`,
+                            { function: functionName, timeout: REQUEST_TIMEOUT }
+                        );
+                    }
+
+                    if (error instanceof APIError) {
+                        throw error;
+                    }
+
+                    throw new APIError(
+                        `Alpha Vantage request failed: ${error.message}`,
+                        { function: functionName, originalError: error.message }
+                    );
+                }
             });
 
-            clearTimeout(timeoutId);
-
-            if (!response.ok) {
-                throw new APIError(
-                    `Alpha Vantage API error: ${response.status} ${response.statusText}`,
-                    { status: response.status, function: functionName }
-                );
-            }
-
-            const data = await response.json() as Record<string, unknown>;
-
-            // Check for Alpha Vantage error responses
-            if (data['Error Message']) {
-                throw new APIError(
-                    `Alpha Vantage API error: ${data['Error Message']}`,
-                    { code: 'ALPHA_VANTAGE_ERROR', response: data }
-                );
-            }
-
-            // Check for rate limit note
-            if (typeof data['Note'] === 'string' && data['Note'].includes('5 calls per minute')) {
-                throw new APIError(
-                    'Alpha Vantage rate limit hit (5/min). Please wait 12 seconds.',
-                    { code: 'RATE_LIMIT_HIT', retryAfter: 12000 }
-                );
-            }
-
-            // Check for information message (often means invalid symbol or no data)
-            if (data['Information']) {
-                throw new APIError(
-                    `Alpha Vantage: ${data['Information']}`,
-                    { code: 'NO_DATA', response: data }
-                );
-            }
-
-            // Record successful call on this key
-            pool.recordSuccess(managedKey);
-
-            return data as T;
-
         } catch (error: any) {
-            if (error.name === 'AbortError') {
-                throw new APIError(
-                    `Request timeout for Alpha Vantage ${functionName}`,
-                    { function: functionName, timeout: REQUEST_TIMEOUT }
-                );
+            // RETRY LOGIC: If this key was rejected for rate/daily limits,
+            // mark it exhausted and try the next key
+            if (error instanceof APIError &&
+                (error.details?.code === 'KEY_DAILY_LIMIT' || error.details?.code === 'RATE_LIMIT_HIT')) {
+                console.warn(`🔄 [Key Pool] ${managedKey.label} rejected by AV server — trying next key...`);
+                pool.markExhausted(managedKey);
+                continue; // retry with next key
             }
 
-            if (error instanceof APIError) {
-                throw error;
-            }
-
-            throw new APIError(
-                `Alpha Vantage request failed: ${error.message}`,
-                { function: functionName, originalError: error.message }
-            );
+            // Non-retryable error — propagate
+            throw error;
         }
-    });
+    }
 }
 
 /**
