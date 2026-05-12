@@ -871,39 +871,9 @@ function generateWarnings(
  * Full DCF v5 analysis: EBITDA-based FCFF model with equity bridge,
  * GDP-guarded terminal growth, exit multiple cross-check, and user overrides.
  */
-export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): Promise<DCFResult> {
+export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const sym = symbol.toUpperCase().trim();
     console.log(`\n📈 [DCF v5] Starting analysis for ${sym}...`);
-
-    // ─── 0. Validate overrides ───────────────────────
-    if (overrides) {
-        const ov = overrides;
-        if (ov.growthRate !== undefined && (ov.growthRate < 0 || ov.growthRate > 0.50)) {
-            throw new APIError(`Override validation: growthRate must be between 0 and 0.50 (got ${ov.growthRate}).`, { field: 'growthRate', value: ov.growthRate });
-        }
-        if (ov.fcfMargin !== undefined && (ov.fcfMargin < 0 || ov.fcfMargin > 0.80)) {
-            throw new APIError(`Override validation: fcfMargin must be between 0 and 0.80 (got ${ov.fcfMargin}).`, { field: 'fcfMargin', value: ov.fcfMargin });
-        }
-        if (ov.wacc !== undefined && (ov.wacc < 0.03 || ov.wacc > 0.25)) {
-            throw new APIError(`Override validation: wacc must be between 0.03 and 0.25 (got ${ov.wacc}).`, { field: 'wacc', value: ov.wacc });
-        }
-        if (ov.terminalGrowthRate !== undefined && (ov.terminalGrowthRate < 0 || ov.terminalGrowthRate > 0.08)) {
-            throw new APIError(`Override validation: terminalGrowthRate must be between 0 and 0.08 (got ${ov.terminalGrowthRate}).`, { field: 'terminalGrowthRate', value: ov.terminalGrowthRate });
-        }
-        if (ov.costOfEquity !== undefined && (ov.costOfEquity < 0.02 || ov.costOfEquity > 0.30)) {
-            throw new APIError(`Override validation: costOfEquity must be between 0.02 and 0.30 (got ${ov.costOfEquity}).`, { field: 'costOfEquity', value: ov.costOfEquity });
-        }
-        if (ov.costOfDebt !== undefined && (ov.costOfDebt < 0 || ov.costOfDebt > 0.20)) {
-            throw new APIError(`Override validation: costOfDebt must be between 0 and 0.20 (got ${ov.costOfDebt}).`, { field: 'costOfDebt', value: ov.costOfDebt });
-        }
-        if (ov.gdpCeiling !== undefined && (ov.gdpCeiling < 0 || ov.gdpCeiling > 0.10)) {
-            throw new APIError(`Override validation: gdpCeiling must be between 0 and 0.10 (got ${ov.gdpCeiling}).`, { field: 'gdpCeiling', value: ov.gdpCeiling });
-        }
-        if (ov.capexRatio !== undefined && (ov.capexRatio < 0 || ov.capexRatio > 0.50)) {
-            throw new APIError(`Override validation: capexRatio must be between 0 and 0.50 (got ${ov.capexRatio}).`, { field: 'capexRatio', value: ov.capexRatio });
-        }
-        console.log(`📊 [DCF] Overrides validated:`, JSON.stringify(ov));
-    }
 
     // ─── 1. Fetch all data via FMP ────────────────────
     console.log(`📊 [DCF] Step 1: Fetching FMP data bundle...`);
@@ -939,8 +909,8 @@ export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): 
         ? Math.max(0, Math.min(latestIncome.incomeTaxExpense / latestIncome.incomeBeforeTax, 0.40))
         : TAX_RATE;
     const ebitdaMargin = baseRevenue > 0 ? (latestIncome.ebitda / baseRevenue) : 0.20;
-    const capexToRevenue = overrides?.capexRatio ?? (latestCashFlow.capitalExpenditure > 0
-        ? latestCashFlow.capitalExpenditure / baseRevenue : 0.05);
+    const capexToRevenue = latestCashFlow.capitalExpenditure > 0
+        ? latestCashFlow.capitalExpenditure / baseRevenue : 0.05;
     const daToRevenue = latestCashFlow.depreciationAndAmortization > 0
         ? latestCashFlow.depreciationAndAmortization / baseRevenue : 0.03;
     const netDebt = latestBalance.netDebt || 0;
@@ -949,39 +919,20 @@ export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): 
     // ─── 4. GDP ceiling ──────────────────────────────
     console.log(`📊 [DCF] Step 3: Resolving GDP ceiling...`);
     const gdpResult = resolveGDPCeiling(profile.country || 'US', revenueSegments);
-    const gdpCeiling = overrides?.gdpCeiling ?? gdpResult.gdpCeiling;
-    const terminalGrowthRate = overrides?.terminalGrowthRate ?? Math.min(TERMINAL_GROWTH_RATE, gdpCeiling);
-
-    // P3.2 — Enforce terminal growth guard (throw if user override exceeds GDP ceiling)
-    if (overrides?.terminalGrowthRate !== undefined && terminalGrowthRate > gdpCeiling) {
-        throw new APIError(
-            `Terminal growth rate override (${(terminalGrowthRate * 100).toFixed(2)}%) exceeds GDP ceiling ` +
-            `for ${gdpResult.country} (${(gdpCeiling * 100).toFixed(2)}%). ` +
-            `Maximum allowed: ${(gdpCeiling * 100).toFixed(2)}%.`,
-            { field: 'terminalGrowthRate', value: terminalGrowthRate, gdpCeiling, country: gdpResult.country }
-        );
-    }
+    const gdpCeiling = gdpResult.gdpCeiling;
+    const terminalGrowthRate = Math.min(TERMINAL_GROWTH_RATE, gdpCeiling);
     console.log(`📊 [DCF] Terminal growth: ${(terminalGrowthRate * 100).toFixed(2)}% (GDP ceiling: ${(gdpCeiling * 100).toFixed(2)}%)`);
 
     // ─── 5. Growth rate ──────────────────────────────
     console.log(`📊 [DCF] Step 4: Selecting growth rate...`);
-    const growth = overrides?.growthRate !== undefined
-        ? { rate: overrides.growthRate, source: 'user_override', raw: null as number | null }
-        : selectGrowthRate(sortedIncome, analystEstimates);
+    const growth = selectGrowthRate(sortedIncome, analystEstimates);
     console.log(`📊 [DCF] Growth: ${(growth.rate * 100).toFixed(2)}% (${growth.source})`);
 
     // ─── 6. FCF margin ───────────────────────────────
     console.log(`📊 [DCF] Step 5: Computing FCF margin...`);
-    let fcfMargin: number;
-    let fcfMethod: string;
-    if (overrides?.fcfMargin !== undefined) {
-        fcfMargin = overrides.fcfMargin;
-        fcfMethod = 'user_override';
-    } else {
-        const mr = calculateNormalizedFCFMargin(sortedIncome, sortedCashFlow, sortedBalance);
-        fcfMargin = mr.margin;
-        fcfMethod = mr.method;
-    }
+    const mr = calculateNormalizedFCFMargin(sortedIncome, sortedCashFlow, sortedBalance);
+    const fcfMargin = mr.margin;
+    const fcfMethod = mr.method;
     console.log(`📊 [DCF] FCF margin: ${(fcfMargin * 100).toFixed(2)}% (${fcfMethod})`);
 
     // ─── 7. Peer Beta + WACC ─────────────────────────
@@ -997,19 +948,7 @@ export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): 
     );
     console.log(`📊 [DCF] Beta: ${peerBetaResult.leveredBeta.toFixed(3)} (${peerBetaResult.method}, ${peerBetaResult.peersUsed.length} peers)`);
 
-    let waccResult: ReturnType<typeof calculateWACC>;
-    if (overrides?.wacc !== undefined) {
-        waccResult = {
-            wacc: overrides.wacc,
-            components: { costOfEquity: 0, costOfDebt: 0, equityWeight: 0, debtWeight: 0, beta: peerBetaResult.leveredBeta, riskFreeRate: RISK_FREE_RATE },
-            clamped: false,
-            sector,
-        };
-    } else {
-        waccResult = calculateWACC(profile, latestBalance, latestIncome, {
-            costOfEquity: overrides?.costOfEquity, costOfDebt: overrides?.costOfDebt,
-        }, peerBetaResult);
-    }
+    const waccResult = calculateWACC(profile, latestBalance, latestIncome, {}, peerBetaResult);
     console.log(`📊 [DCF] WACC: ${(waccResult.wacc * 100).toFixed(2)}%${waccResult.clamped ? ' (clamped)' : ''}`);
 
     // ─── 8. Project 10 years ─────────────────────────
@@ -1040,19 +979,11 @@ export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): 
     if (terminalGrowthRate > gdpCeiling) {
         warnings.push(`Terminal growth (${(terminalGrowthRate * 100).toFixed(1)}%) exceeds GDP ceiling (${(gdpCeiling * 100).toFixed(1)}%).`);
     }
-    const appliedOverrides: Partial<DCFOverrides> = {};
-    if (overrides) {
-        for (const [k, v] of Object.entries(overrides)) {
-            if (v !== undefined) (appliedOverrides as any)[k] = v;
-        }
-    }
-
     const result: DCFResult = {
         metadata: {
             companyName: profile.companyName, ticker: sym,
             sector: profile.sector || 'Unknown', dcfMethod: 'ebitda_based_fcff',
             analysisDate: new Date().toISOString(),
-            ...(Object.keys(appliedOverrides).length > 0 ? { overridesApplied: appliedOverrides } : {}),
         },
         currentMarketData: { currentPrice, marketCap: profile.mktCap || 0, sharesOutstanding },
         growthAnalysis: {

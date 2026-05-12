@@ -17,16 +17,6 @@ const DCFInputSchema = z.object({
     symbol: z.string().min(1).max(10).describe(
         'Stock ticker symbol (e.g., AAPL, MSFT, GOOGL). Must be a US-listed equity.'
     ),
-    overrides: z.object({
-        growthRate: z.number().min(0).max(1).optional().describe('Override the initial phase growth rate (e.g., 0.15 for 15%)'),
-        fcfMargin: z.number().min(0).max(1).optional().describe('Override the Free Cash Flow margin (e.g., 0.20 for 20%)'),
-        wacc: z.number().min(0).max(1).optional().describe('Override the Discount Rate / WACC (e.g., 0.10 for 10%)'),
-        terminalGrowthRate: z.number().min(0).max(1).optional().describe('Override the Gordon Growth terminal rate (e.g., 0.025 for 2.5%)'),
-        costOfEquity: z.number().min(0).max(1).optional().describe('Override the Cost of Equity for WACC calculation'),
-        costOfDebt: z.number().min(0).max(1).optional().describe('Override the Cost of Debt for WACC calculation'),
-        gdpCeiling: z.number().min(0).max(1).optional().describe('Override the GDP ceiling guardrail for terminal growth'),
-        capexRatio: z.number().min(0).max(1).optional().describe('Override the Capex to Revenue ratio'),
-    }).optional().describe('Optional overrides for standard DCF calculations.'),
 });
 
 const QuickDCFInputSchema = z.object({
@@ -235,20 +225,6 @@ export function registerDCFAnalysisTool(): void {
                     type: 'string',
                     description: 'Stock ticker symbol (e.g., AAPL, MSFT, GOOGL). Must be a US-listed equity.',
                 },
-                overrides: {
-                    type: 'object',
-                    description: 'Optional overrides for standard DCF calculations.',
-                    properties: {
-                        growthRate: { type: 'number', description: 'Override the initial phase growth rate (e.g., 0.15)' },
-                        fcfMargin: { type: 'number', description: 'Override the Free Cash Flow margin (e.g., 0.20)' },
-                        wacc: { type: 'number', description: 'Override the Discount Rate / WACC (e.g., 0.10)' },
-                        terminalGrowthRate: { type: 'number', description: 'Override the Gordon Growth terminal rate (e.g., 0.025)' },
-                        costOfEquity: { type: 'number', description: 'Override the Cost of Equity' },
-                        costOfDebt: { type: 'number', description: 'Override the Cost of Debt' },
-                        gdpCeiling: { type: 'number', description: 'Override the GDP ceiling guardrail' },
-                        capexRatio: { type: 'number', description: 'Override the Capex to Revenue ratio' },
-                    }
-                }
             },
             required: ['symbol'],
         },
@@ -256,8 +232,7 @@ export function registerDCFAnalysisTool(): void {
             try {
                 const input = DCFInputSchema.parse(args);
                 console.log(`\n🔬 [DCF Tool] Starting DCF analysis for ${input.symbol}...`);
-
-                const result = await runDCFAnalysis(input.symbol, input.overrides);
+                const result = await runDCFAnalysis(input.symbol);
                 const formattedOutput = formatDCFOutput(result);
 
                 return {
