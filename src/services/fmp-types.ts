@@ -267,9 +267,10 @@ export interface FMPKeyMetrics {
 export interface FMPRevenueSegment {
     date: string;
     symbol: string;
-    reportedCurrency: string;
+    reportedCurrency: string | null;
     period: string;
-    [region: string]: string | number; // region keys are dynamic: "Americas", "Europe", etc.
+    fiscalYear: number;
+    data: Record<string, number>; // region keys are dynamic: "Americas Segment", "Europe Segment", etc.
 }
 
 export interface ParsedRevenueSegment {
@@ -313,7 +314,9 @@ export interface FMPAnalystEstimate {
 
 export interface FMPPeersResponse {
     symbol: string;
-    peersList: string[];
+    companyName: string;
+    price: number;
+    mktCap: number;
 }
 
 // ─────────────────────────────────────────────────────────

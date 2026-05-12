@@ -201,8 +201,8 @@ export async function fetchFMPIncomeStatement(
 
     console.log(`📊 [FMP] Fetching ${period} income statement for ${sym}...`);
     const data = await fmpRequest<FMPIncomeStatement[]>(
-        `/income-statement/${sym}`,
-        { period, limit: String(limit) },
+        `/income-statement`,
+        { symbol: sym, period, limit: String(limit) },
     );
 
     try {
@@ -236,8 +236,8 @@ export async function fetchFMPBalanceSheet(
 
     console.log(`📊 [FMP] Fetching ${period} balance sheet for ${sym}...`);
     const data = await fmpRequest<FMPBalanceSheet[]>(
-        `/balance-sheet-statement/${sym}`,
-        { period, limit: String(limit) },
+        `/balance-sheet-statement`,
+        { symbol: sym, period, limit: String(limit) },
     );
 
     try {
@@ -271,8 +271,8 @@ export async function fetchFMPCashFlowStatement(
 
     console.log(`📊 [FMP] Fetching ${period} cash flow for ${sym}...`);
     const data = await fmpRequest<FMPCashFlowStatement[]>(
-        `/cash-flow-statement/${sym}`,
-        { period, limit: String(limit) },
+        `/cash-flow-statement`,
+        { symbol: sym, period, limit: String(limit) },
     );
 
     try {
@@ -305,7 +305,7 @@ export async function fetchFMPProfile(symbol: string): Promise<FMPProfile> {
     } catch { /* cache miss */ }
 
     console.log(`📊 [FMP] Fetching profile for ${sym}...`);
-    const data = await fmpRequest<FMPProfile[]>(`/profile/${sym}`);
+    const data = await fmpRequest<FMPProfile[]>(`/profile`, { symbol: sym });
 
     if (!data[0] || !data[0].companyName) {
         throw new APIError(
@@ -346,8 +346,8 @@ export async function fetchFMPEnterpriseValue(
 
     console.log(`📊 [FMP] Fetching enterprise value for ${sym}...`);
     const data = await fmpRequest<FMPEnterpriseValue[]>(
-        `/enterprise-values/${sym}`,
-        { period: 'annual', limit: String(limit) },
+        `/enterprise-values`,
+        { symbol: sym, period: 'annual', limit: String(limit) },
     );
 
     try {
@@ -381,8 +381,8 @@ export async function fetchFMPKeyMetrics(
 
     console.log(`📊 [FMP] Fetching key metrics for ${sym}...`);
     const data = await fmpRequest<FMPKeyMetrics[]>(
-        `/key-metrics/${sym}`,
-        { period, limit: String(limit) },
+        `/key-metrics`,
+        { symbol: sym, period, limit: String(limit) },
     );
 
     try {
@@ -420,8 +420,8 @@ export async function fetchFMPRevenueSegments(
     try {
         console.log(`📊 [FMP] Fetching revenue segments for ${sym}...`);
         const data = await fmpRequest<FMPRevenueSegment[]>(
-            `/revenue-geographic-segmentation/${sym}`,
-            { structure: 'flat' },
+            `/revenue-geographic-segmentation`,
+            { symbol: sym },
         );
 
         if (!data || data.length === 0) {
@@ -431,16 +431,18 @@ export async function fetchFMPRevenueSegments(
 
         // Take the most recent entry
         const latest = data[0];
-        const metaFields = new Set(['date', 'symbol', 'reportedCurrency', 'period', 'fillingDate', 'cik']);
 
         // Sum all segments for total revenue
         let totalRevenue = 0;
         const rawSegments: Array<{ segment: string; revenue: number }> = [];
 
-        for (const [key, value] of Object.entries(latest)) {
-            if (metaFields.has(key) || typeof value !== 'number') continue;
-            rawSegments.push({ segment: key, revenue: value });
-            totalRevenue += value;
+        if (latest.data) {
+            for (const [segment, revenue] of Object.entries(latest.data)) {
+                if (typeof revenue === 'number') {
+                    rawSegments.push({ segment, revenue });
+                    totalRevenue += revenue;
+                }
+            }
         }
 
         if (totalRevenue <= 0) return [];
@@ -504,11 +506,11 @@ export async function fetchFMPIndustryPeers(symbol: string): Promise<string[]> {
     try {
         console.log(`📊 [FMP] Fetching industry peers for ${sym}...`);
         const data = await fmpRequest<FMPPeersResponse[]>(
-            `/stock_peers`,
+            `/stock-peers`,
             { symbol: sym },
         );
 
-        const peers = data?.[0]?.peersList ?? [];
+        const peers = data?.map(p => p.symbol) ?? [];
 
         try {
             const cache = getCacheService();
@@ -546,8 +548,8 @@ export async function fetchFMPAnalystEstimates(
     try {
         console.log(`📊 [FMP] Fetching analyst estimates for ${sym}...`);
         const data = await fmpRequest<FMPAnalystEstimate[]>(
-            `/analyst-estimates/${sym}`,
-            { period: 'annual', limit: String(limit) },
+            `/analyst-estimates`,
+            { symbol: sym, period: 'annual', limit: String(limit) },
         );
 
         try {
