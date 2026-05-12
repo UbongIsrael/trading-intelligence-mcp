@@ -100,6 +100,10 @@ export const apiConfig = {
     apiKey: process.env.FINNHUB_API_KEY,
     baseUrl: 'https://finnhub.io/api/v1',
   },
+  fmp: {
+    apiKey: process.env.FMP_API_KEY,
+    baseUrl: 'https://financialmodelingprep.com/stable',
+  },
   newsApi: {
     apiKey: process.env.NEWS_API_KEY,
     baseUrl: 'https://newsapi.org/v2',
@@ -155,6 +159,9 @@ export function validateConfig(): void {
   }
   if (!apiConfig.coinGecko.apiKey) {
     warnings.push('COINGECKO_API_KEY is not set - rate limits will be lower');
+  }
+  if (!apiConfig.fmp.apiKey) {
+    warnings.push('FMP_API_KEY is not set - DCF analysis will fail without a Financial Modeling Prep API key');
   }
 
   // Log warnings

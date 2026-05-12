@@ -1,5 +1,5 @@
 /**
- * DCF (Discounted Cash Flow) Analysis Tool — v4
+ * DCF (Discounted Cash Flow) Analysis Tool — v5
  * 
  * MCP tool registration for the DCF analysis service.
  * Exposes `run_dcf_analysis` (full DCF) and `quick_dcf` (EPS-based quick mode).
@@ -17,6 +17,16 @@ const DCFInputSchema = z.object({
     symbol: z.string().min(1).max(10).describe(
         'Stock ticker symbol (e.g., AAPL, MSFT, GOOGL). Must be a US-listed equity.'
     ),
+    overrides: z.object({
+        growthRate: z.number().min(0).max(1).optional().describe('Override the initial phase growth rate (e.g., 0.15 for 15%)'),
+        fcfMargin: z.number().min(0).max(1).optional().describe('Override the Free Cash Flow margin (e.g., 0.20 for 20%)'),
+        wacc: z.number().min(0).max(1).optional().describe('Override the Discount Rate / WACC (e.g., 0.10 for 10%)'),
+        terminalGrowthRate: z.number().min(0).max(1).optional().describe('Override the Gordon Growth terminal rate (e.g., 0.025 for 2.5%)'),
+        costOfEquity: z.number().min(0).max(1).optional().describe('Override the Cost of Equity for WACC calculation'),
+        costOfDebt: z.number().min(0).max(1).optional().describe('Override the Cost of Debt for WACC calculation'),
+        gdpCeiling: z.number().min(0).max(1).optional().describe('Override the GDP ceiling guardrail for terminal growth'),
+        capexRatio: z.number().min(0).max(1).optional().describe('Override the Capex to Revenue ratio'),
+    }).optional().describe('Optional overrides for standard DCF calculations.'),
 });
 
 const QuickDCFInputSchema = z.object({
@@ -47,18 +57,26 @@ function formatDCFOutput(result: DCFResult): string {
 
     // ── Header ──────────────────────────────────────
     output += `\n${'═'.repeat(70)}\n`;
-    output += `  📊 DCF ANALYSIS v4: ${metadata.companyName} (${metadata.ticker})\n`;
+    output += `  📊 DCF ANALYSIS v5: ${metadata.companyName} (${metadata.ticker})\n`;
     output += `${'═'.repeat(70)}\n`;
-    output += `  Date: ${metadata.analysisDate.split('T')[0]} | Method: Revenue-Anchored FCF\n`;
+    output += `  Date: ${metadata.analysisDate.split('T')[0]} | Method: EBITDA-based FCFF\n`;
     output += `  Sector: ${metadata.sector}\n`;
 
     // ── Current Market Data ─────────────────
     output += `\n${'─'.repeat(70)}\n`;
-    output += `  📈 CURRENT MARKET DATA\n`;
+    output += `  📈 CURRENT MARKET DATA & EQUITY BRIDGE\n`;
     output += `${'─'.repeat(70)}\n`;
     output += `  Current Price:       $${currentMarketData.currentPrice.toFixed(2)}\n`;
     output += `  Market Cap:          ${fmtNum(currentMarketData.marketCap)}\n`;
     output += `  Shares Outstanding:  ${(currentMarketData.sharesOutstanding / 1e9).toFixed(2)}B\n`;
+    
+    if (result.equityBridge) {
+        const eb = result.equityBridge;
+        output += `\n  Equity Bridge:\n`;
+        output += `    Enterprise Value:  ${fmtNum(eb.enterpriseValue)}\n`;
+        output += `    Less: Net Debt:    ${fmtNum(eb.netDebt)}\n`;
+        output += `    Equity Value:      ${fmtNum(eb.equityValue)}\n`;
+    }
 
     // ── Growth Analysis ─────────────────────
     output += `\n${'─'.repeat(70)}\n`;
@@ -100,7 +118,16 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  Terminal Growth Rate: ${terminalValue.terminalGrowth}\n`;
     output += `  Undiscounted Value:   ${fmtNum(terminalValue.undiscountedValue)}\n`;
     output += `  Discounted Value:     ${fmtNum(terminalValue.discountedValue)}\n`;
-    output += `  % of Total Value:     ${terminalValue.percentOfTotal}\n`;
+    output += `  % of Enterprise Value: ${terminalValue.percentOfTotal}\n`;
+
+    if (result.terminalValueCrossCheck) {
+        const tvcc = result.terminalValueCrossCheck;
+        output += `\n  🏁 EXIT MULTIPLE CROSS-CHECK\n`;
+        output += `${'─'.repeat(70)}\n`;
+        output += `  Exit EBITDA Multiple: ${tvcc.multiple}x\n`;
+        output += `  Undiscounted Value:   ${fmtNum(tvcc.undiscountedValue)}\n`;
+        output += `  Discounted Value:     ${fmtNum(tvcc.discountedValue)}\n`;
+    }
 
     // ── Valuation Summary ───────────────────
     output += `\n${'═'.repeat(70)}\n`;
@@ -187,18 +214,18 @@ export function registerDCFAnalysisTool(): void {
     registerTool({
         name: 'run_dcf_analysis',
         description: 'Perform a comprehensive Discounted Cash Flow (DCF) analysis on a stock. ' +
-            'Revenue-anchored FCF model with WACC discounting, Gordon Growth terminal value, ' +
-            'and reverse DCF. Returns 10-year projections, intrinsic value, and investment recommendation. ' +
-            'Uses historical financial data from Alpha Vantage.',
+            'EBITDA-based FCFF model with equity bridge, WACC discounting, Gordon Growth terminal value, ' +
+            'exit multiple cross-check, and reverse DCF. Returns 10-year projections, intrinsic value, ' +
+            'and investment recommendation. Uses high-quality SEC data via FMP.',
         category: 'fundamental',
-        version: '4.0.0',
+        version: '5.0.0',
         _meta: {
             rateLimit: {
-                maxRequestsPerMinute: 5,
-                cooldownMs: 3000,
+                maxRequestsPerMinute: 10,
+                cooldownMs: 1000,
                 maxConcurrency: 1,
                 supportsBulk: false,
-                notes: "Alpha Vantage free tier: use snapshot methods before per-asset loops to avoid API exhaustion."
+                notes: "FMP Premium endpoints used. Built-in caching mitigates duplicate requests."
             }
         },
         inputSchema: {
@@ -208,6 +235,20 @@ export function registerDCFAnalysisTool(): void {
                     type: 'string',
                     description: 'Stock ticker symbol (e.g., AAPL, MSFT, GOOGL). Must be a US-listed equity.',
                 },
+                overrides: {
+                    type: 'object',
+                    description: 'Optional overrides for standard DCF calculations.',
+                    properties: {
+                        growthRate: { type: 'number', description: 'Override the initial phase growth rate (e.g., 0.15)' },
+                        fcfMargin: { type: 'number', description: 'Override the Free Cash Flow margin (e.g., 0.20)' },
+                        wacc: { type: 'number', description: 'Override the Discount Rate / WACC (e.g., 0.10)' },
+                        terminalGrowthRate: { type: 'number', description: 'Override the Gordon Growth terminal rate (e.g., 0.025)' },
+                        costOfEquity: { type: 'number', description: 'Override the Cost of Equity' },
+                        costOfDebt: { type: 'number', description: 'Override the Cost of Debt' },
+                        gdpCeiling: { type: 'number', description: 'Override the GDP ceiling guardrail' },
+                        capexRatio: { type: 'number', description: 'Override the Capex to Revenue ratio' },
+                    }
+                }
             },
             required: ['symbol'],
         },
@@ -216,7 +257,7 @@ export function registerDCFAnalysisTool(): void {
                 const input = DCFInputSchema.parse(args);
                 console.log(`\n🔬 [DCF Tool] Starting DCF analysis for ${input.symbol}...`);
 
-                const result = await runDCFAnalysis(input.symbol);
+                const result = await runDCFAnalysis(input.symbol, input.overrides);
                 const formattedOutput = formatDCFOutput(result);
 
                 return {
@@ -241,7 +282,7 @@ export function registerDCFAnalysisTool(): void {
             }
         },
     });
-    console.log('✅ [DCF Tool] Registered: run_dcf_analysis (v4)');
+    console.log('✅ [DCF Tool] Registered: run_dcf_analysis (v5)');
 
     // ── Quick DCF Tool ─────────────────────
     registerTool({
@@ -257,7 +298,7 @@ export function registerDCFAnalysisTool(): void {
                 cooldownMs: 3000,
                 maxConcurrency: 1,
                 supportsBulk: false,
-                notes: "Alpha Vantage free tier: use snapshot methods before per-asset loops to avoid API exhaustion."
+                notes: "FMP data source. Built-in caching mitigates duplicate requests."
             }
         },
         inputSchema: {

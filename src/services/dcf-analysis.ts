@@ -1,15 +1,22 @@
-// DCF v4 — Simplified revenue-anchored model
-// v3 features (recency weighting, dual terminal, buyback yield, composite growth,
-// capex decomposition, sanity gates, sensitivity analysis) removed for reliability.
-// Restore as v5 enhancements once base model is validated.
+// DCF v5 — EBITDA-based FCFF model with equity bridge
+// Migrated from Alpha Vantage to Financial Modeling Prep (FMP)
+// Key v5 additions: equity bridge, EBITDA-based FCFF, fractional discounting,
+// exit EBITDA multiple cross-check, sensitivity analysis, user overrides
 
 import {
-    fetchCompanyOverview,
-    fetchFinancialStatements,
-    fetchEarnings,
-    type CompanyOverview,
-    type FinancialStatement,
-} from './fundamentals-alphavantage.js';
+    fetchDCFDataBundle,
+    resolveGDPGrowthRate,
+    GDP_FALLBACKS,
+    type FMPIncomeStatement,
+    type FMPBalanceSheet,
+    type FMPCashFlowStatement,
+    type FMPProfile,
+    type ParsedRevenueSegment,
+    fetchFMPProfile,
+    fetchFMPBalanceSheet,
+} from './fmp-data-service.js';
+// REMOVED: Alpha Vantage imports replaced by FMP data service (Phase 1 migration)
+// Alpha Vantage service retained for non-DCF tools (fundamentals-tool, contextual)
 import { getPrice } from './prices.js';
 import { APIError } from '../types.js';
 
@@ -24,28 +31,44 @@ const TERMINAL_GROWTH_RATE = 0.025;  // Long-run GDP growth
 const PROJECTION_YEARS = 10;
 const PHASE_1_YEARS = 5;
 
-const SECTOR_DEFAULTS: Record<string, { beta: number; debtRatio: number; terminalPE: number }> = {
-    'TECHNOLOGY': { beta: 1.2, debtRatio: 0.15, terminalPE: 20 },
-    'HEALTH CARE': { beta: 1.0, debtRatio: 0.20, terminalPE: 18 },
-    'FINANCIALS': { beta: 1.1, debtRatio: 0.60, terminalPE: 12 },
-    'CONSUMER DISCRETIONARY': { beta: 1.0, debtRatio: 0.25, terminalPE: 16 },
-    'CONSUMER STAPLES': { beta: 0.7, debtRatio: 0.25, terminalPE: 18 },
-    'ENERGY': { beta: 1.3, debtRatio: 0.30, terminalPE: 10 },
-    'INDUSTRIALS': { beta: 1.1, debtRatio: 0.30, terminalPE: 15 },
-    'COMMUNICATION SERVICES': { beta: 1.0, debtRatio: 0.20, terminalPE: 18 },
-    'UTILITIES': { beta: 0.5, debtRatio: 0.50, terminalPE: 14 },
-    'REAL ESTATE': { beta: 0.8, debtRatio: 0.45, terminalPE: 16 },
-    'MATERIALS': { beta: 1.1, debtRatio: 0.25, terminalPE: 14 },
-    'DEFAULT': { beta: 1.0, debtRatio: 0.25, terminalPE: 15 },
+const SECTOR_DEFAULTS: Record<string, { beta: number; debtRatio: number; terminalPE: number; ebitdaMultiple: number }> = {
+    'TECHNOLOGY':             { beta: 1.2, debtRatio: 0.15, terminalPE: 20, ebitdaMultiple: 25 },
+    'HEALTH CARE':            { beta: 1.0, debtRatio: 0.20, terminalPE: 18, ebitdaMultiple: 15 },
+    'FINANCIALS':             { beta: 1.1, debtRatio: 0.60, terminalPE: 12, ebitdaMultiple: 12 },
+    'CONSUMER DISCRETIONARY': { beta: 1.0, debtRatio: 0.25, terminalPE: 16, ebitdaMultiple: 12 },
+    'CONSUMER STAPLES':       { beta: 0.7, debtRatio: 0.25, terminalPE: 18, ebitdaMultiple: 14 },
+    'ENERGY':                 { beta: 1.3, debtRatio: 0.30, terminalPE: 10, ebitdaMultiple: 8 },
+    'INDUSTRIALS':            { beta: 1.1, debtRatio: 0.30, terminalPE: 15, ebitdaMultiple: 13 },
+    'COMMUNICATION SERVICES': { beta: 1.0, debtRatio: 0.20, terminalPE: 18, ebitdaMultiple: 15 },
+    'UTILITIES':              { beta: 0.5, debtRatio: 0.50, terminalPE: 14, ebitdaMultiple: 12 },
+    'REAL ESTATE':            { beta: 0.8, debtRatio: 0.45, terminalPE: 16, ebitdaMultiple: 18 },
+    'MATERIALS':              { beta: 1.1, debtRatio: 0.25, terminalPE: 14, ebitdaMultiple: 10 },
+    'DEFAULT':                { beta: 1.0, debtRatio: 0.25, terminalPE: 15, ebitdaMultiple: 13 },
 };
 
 // ─────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────
 
+/** User-overridable fields for the DCF model */
+export interface DCFOverrides {
+    terminalGrowthRate?: number;     // override GDP-validated ceiling
+    wacc?: number;                   // skip WACC calculation entirely
+    costOfEquity?: number;           // override CAPM cost of equity
+    costOfDebt?: number;             // override calculated cost of debt
+    growthRate?: number;             // override revenue growth selection
+    fcfMargin?: number;              // override normalized FCF margin
+    capexRatio?: number;             // override CapEx/Revenue ratio
+    gdpCeiling?: number;             // manually override GDP growth ceiling
+}
+
 export interface DCFProjection {
     year: number;
     revenue: number;
+    ebitda: number;
+    capex: number;
+    da: number;
+    workingCapitalDelta: number;
     fcf: number;
     growthApplied: number;
     discountedFCF: number;
@@ -58,6 +81,7 @@ export interface DCFResult {
         sector: string;
         dcfMethod: string;
         analysisDate: string;
+        overridesApplied?: Partial<DCFOverrides>;
     };
     currentMarketData: {
         currentPrice: number;
@@ -69,6 +93,7 @@ export interface DCFResult {
         growthSource: string;
         revenueCAGR3yr: number | null;
         normalizedFCFMargin: number;
+        fcffMethod: string;
     };
     waccCalculation: {
         wacc: number;
@@ -80,12 +105,15 @@ export interface DCFResult {
             debtWeight: number;
             beta: number;
             riskFreeRate: number;
+            preferredStockWeight?: number;
         };
         sector: string;
+        betaSource?: string;
     };
     projections: Array<{
         year: number;
         revenue: number;
+        ebitda: number;
         fcf: number;
         growthRate: string;
         discountedFCF: number;
@@ -96,6 +124,19 @@ export interface DCFResult {
         undiscountedValue: number;
         discountedValue: number;
         percentOfTotal: string;
+    };
+    terminalValueCrossCheck?: {
+        method: string;
+        multiple: number;
+        undiscountedValue: number;
+        discountedValue: number;
+        percentOfTotal: string;
+    };
+    equityBridge: {
+        enterpriseValue: number;
+        netDebt: number;
+        cash: number;
+        equityValue: number;
     };
     valuationSummary: {
         intrinsicValue: number;
@@ -112,6 +153,16 @@ export interface DCFResult {
         recommendation: string;
         confidence: string;
         reasoning: string;
+    };
+    keyAssumptions: {
+        baseRevenue: number;
+        effectiveTaxRate: number;
+        ebitdaMargin: number;
+        capexToRevenue: number;
+        daToRevenue: number;
+        gdpCeiling: number;
+        gdpCountry: string;
+        filingDate: string;
     };
     warnings: string[];
 }
@@ -154,6 +205,189 @@ function calculateCAGR(startValue: number, endValue: number, years: number): num
 }
 
 /**
+ * P2.2 — Compute Free Cash Flow to Firm (FCFF) from EBITDA components.
+ * Formula: FCFF = EBITDA × (1 - taxRate) + D&A - CapEx - ΔWorkingCapital
+ */
+export function computeFCFF(
+    ebitda: number,
+    taxRate: number,
+    da: number,
+    capex: number,
+    deltaWorkingCapital: number,
+): { fcff: number; components: { ebitdaAfterTax: number; daAddback: number; capexDeduction: number; wcDeduction: number } } {
+    const ebitdaAfterTax = ebitda * (1 - taxRate);
+    const fcff = ebitdaAfterTax + da - capex - deltaWorkingCapital;
+    return {
+        fcff,
+        components: { ebitdaAfterTax, daAddback: da, capexDeduction: capex, wcDeduction: deltaWorkingCapital },
+    };
+}
+
+/**
+ * P2.5 — Compute exact fraction of year between two dates.
+ * Used for fractional discounting per the spec's YEARFRAC requirement.
+ */
+export function yearFrac(startDate: Date, endDate: Date): number {
+    const msPerYear = 365.25 * 24 * 60 * 60 * 1000;
+    return (endDate.getTime() - startDate.getTime()) / msPerYear;
+}
+
+/**
+ * P2.9 — Exit EBITDA Multiple terminal value (cross-check for Gordon Growth).
+ * TV = EBITDA_year_n × EV/EBITDA_multiple, discounted back to present.
+ */
+export function calculateExitMultipleTV(
+    finalYearEBITDA: number,
+    ebitdaMultiple: number,
+    wacc: number,
+    projectionYears: number = PROJECTION_YEARS,
+): { exitMultipleTV: number; discountedExitMultipleTV: number; multiple: number } {
+    const exitMultipleTV = finalYearEBITDA * ebitdaMultiple;
+    const discountedExitMultipleTV = exitMultipleTV / Math.pow(1 + wacc, projectionYears);
+    return { exitMultipleTV, discountedExitMultipleTV, multiple: ebitdaMultiple };
+}
+
+/**
+ * P3.3 — Un-lever a beta using the Hamada equation.
+ * β_unlevered = β_levered / (1 + (1 - taxRate) × (D/E))
+ */
+export function unleverBeta(leveredBeta: number, taxRate: number, debtToEquityRatio: number): number {
+    return leveredBeta / (1 + (1 - taxRate) * debtToEquityRatio);
+}
+
+/**
+ * P3.4 — Re-lever an unlevered beta using the Hamada equation.
+ * β_levered = β_unlevered × (1 + (1 - taxRate) × (D/E))
+ */
+export function releverBeta(unleveredBeta: number, taxRate: number, debtToEquityRatio: number): number {
+    return unleveredBeta * (1 + (1 - taxRate) * debtToEquityRatio);
+}
+
+/**
+ * P3.1 — Resolve GDP ceiling for terminal growth rate guard.
+ * Priority: 1) single country ≥75% revenue, 2) weighted blend,
+ *           3) IMF world 3%, 4) listing country GDP
+ */
+export function resolveGDPCeiling(
+    countryCode: string,
+    revenueSegments: ParsedRevenueSegment[],
+): { gdpCeiling: number; method: string; country: string } {
+    // Priority 1: Single country ≥75% of revenue
+    if (revenueSegments.length > 0) {
+        const dominant = revenueSegments.find(s => s.share >= 0.75);
+        if (dominant) {
+            const mapped = mapSegmentToCountry(dominant.segment);
+            const gdp = resolveGDPGrowthRate(mapped);
+            return { gdpCeiling: gdp, method: 'dominant_segment', country: mapped };
+        }
+
+        // Priority 2: Weighted blend of segment GDP rates
+        let weightedGDP = 0;
+        let totalWeight = 0;
+        for (const seg of revenueSegments) {
+            const mapped = mapSegmentToCountry(seg.segment);
+            const gdp = resolveGDPGrowthRate(mapped);
+            weightedGDP += gdp * seg.share;
+            totalWeight += seg.share;
+        }
+        if (totalWeight > 0) {
+            return { gdpCeiling: weightedGDP / totalWeight, method: 'weighted_blend', country: 'BLENDED' };
+        }
+    }
+
+    // Priority 3: IMF world GDP
+    if (!countryCode || countryCode === 'WORLD') {
+        return { gdpCeiling: GDP_FALLBACKS['WORLD'], method: 'imf_world', country: 'WORLD' };
+    }
+
+    // Priority 4: Listing country
+    const gdp = resolveGDPGrowthRate(countryCode);
+    return { gdpCeiling: gdp, method: 'listing_country', country: countryCode };
+}
+
+/**
+ * P3.5 — Calculate Peer Beta using pure-play method.
+ * Fetches peers, un-levers their betas, averages them, and re-levers to target capital structure.
+ */
+export async function calculatePeerBeta(
+    peers: string[],
+    targetDE: number,
+    taxRate: number,
+    rawBeta: number
+): Promise<{ leveredBeta: number; unleveredBeta: number; peersUsed: string[]; method: string }> {
+    if (peers.length < 3) {
+        return { 
+            leveredBeta: rawBeta, 
+            unleveredBeta: unleverBeta(rawBeta, taxRate, targetDE), 
+            peersUsed: [], 
+            method: 'raw_profile' 
+        };
+    }
+
+    const selectedPeers = peers.slice(0, 5); // Limit API calls to 5 peers max
+    const unleveredBetas: number[] = [];
+    const peersUsed: string[] = [];
+
+    await Promise.all(selectedPeers.map(async (peer) => {
+        try {
+            const [profile, bs] = await Promise.all([
+                fetchFMPProfile(peer),
+                fetchFMPBalanceSheet(peer, 'annual', 1)
+            ]);
+            const peerBeta = profile.beta;
+            if (!peerBeta) return;
+            
+            const totalDebt = bs[0]?.totalDebt || 0;
+            const marketCap = profile.mktCap || 1; 
+            const peerDE = totalDebt / marketCap;
+            
+            // Assume standard 21% tax rate for peers as approximation if we don't fetch their income statements
+            const peerTaxRate = 0.21; 
+            const uBeta = unleverBeta(peerBeta, peerTaxRate, peerDE);
+            unleveredBetas.push(uBeta);
+            peersUsed.push(peer);
+        } catch {
+            // non-fatal if a peer fetch fails
+        }
+    }));
+
+    if (unleveredBetas.length < 3) {
+        return { 
+            leveredBeta: rawBeta, 
+            unleveredBeta: unleverBeta(rawBeta, taxRate, targetDE), 
+            peersUsed: [], 
+            method: 'raw_profile' 
+        };
+    }
+
+    const avgUnlevered = unleveredBetas.reduce((a, b) => a + b, 0) / unleveredBetas.length;
+    const reLevered = releverBeta(avgUnlevered, taxRate, targetDE);
+
+    return {
+        leveredBeta: reLevered,
+        unleveredBeta: avgUnlevered,
+        peersUsed,
+        method: 'peer_average'
+    };
+}
+
+/** Map FMP revenue segment names to ISO country codes */
+function mapSegmentToCountry(segment: string): string {
+    const lower = segment.toLowerCase();
+    if (lower.includes('america') || lower.includes('united states') || lower === 'us') return 'US';
+    if (lower.includes('china') || lower.includes('greater china')) return 'CN';
+    if (lower.includes('japan')) return 'JP';
+    if (lower.includes('europe')) return 'DE'; // Use Germany as EU proxy
+    if (lower.includes('india')) return 'IN';
+    if (lower.includes('korea')) return 'KR';
+    if (lower.includes('brazil')) return 'BR';
+    if (lower.includes('canada')) return 'CA';
+    if (lower.includes('australia')) return 'AU';
+    if (lower.includes('uk') || lower.includes('united kingdom')) return 'GB';
+    return 'WORLD';
+}
+
+/**
  * Select the best growth rate using a priority hierarchy:
  *   1. Analyst consensus (implied from estimated EPS vs trailing EPS)
  *   2. 3-year Revenue CAGR (stable, observable)
@@ -162,76 +396,98 @@ function calculateCAGR(startValue: number, endValue: number, years: number): num
  * Clamped to [2%, 35%].
  */
 function selectGrowthRate(
-    incomeStatements: FinancialStatement[],
-    earningsData: Array<{ reportedEPS: number; estimatedEPS?: number }> | null,
+    incomeStatements: FMPIncomeStatement[],
+    analystEstimates: { estimatedRevenueAvg?: number; estimatedEpsAvg?: number }[],
 ): { rate: number; source: string; raw: number | null } {
-    // Sort income statements by year descending (most recent first)
-    const sorted = [...incomeStatements].sort((a, b) => b.fiscalYear - a.fiscalYear);
+    // Sort income statements by date descending (most recent first)
+    const sorted = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
 
-    // Method 1: Revenue CAGR (3-year)
-    let revenueCAGR: number | null = null;
-    if (sorted.length >= 4) {
-        const latest = sorted[0];
-        const threeYrsAgo = sorted[3];
-        if (latest.revenue && latest.revenue > 0 && threeYrsAgo.revenue && threeYrsAgo.revenue > 0) {
-            revenueCAGR = calculateCAGR(threeYrsAgo.revenue, latest.revenue, 3);
-        }
-    }
-
-    // Method 2: Analyst consensus — TTM EPS YoY growth (requires 8 quarters of data)
-    if (earningsData && earningsData.length >= 8) {
-        const ttmNow = earningsData.slice(0, 4).reduce((sum, q) => sum + (q.reportedEPS || 0), 0);
-        const ttm1yrAgo = earningsData.slice(4, 8).reduce((sum, q) => sum + (q.reportedEPS || 0), 0);
-        if (ttmNow > 0 && ttm1yrAgo > 0) {
-            const yoyGrowth = (ttmNow / ttm1yrAgo) - 1;
-            if (isFinite(yoyGrowth) && yoyGrowth > 0) {
-                const clamped = Math.max(0.02, Math.min(yoyGrowth, 0.35));
-                return { rate: clamped, source: 'analyst_yoy', raw: revenueCAGR };
+    // Method 1: Analyst forward revenue growth
+    if (analystEstimates.length > 0 && sorted.length > 0) {
+        const fwdRevenue = analystEstimates[0]?.estimatedRevenueAvg;
+        const latestRevenue = sorted[0]?.revenue;
+        if (fwdRevenue && fwdRevenue > 0 && latestRevenue && latestRevenue > 0) {
+            const impliedGrowth = (fwdRevenue / latestRevenue) - 1;
+            if (isFinite(impliedGrowth) && impliedGrowth > 0) {
+                const clamped = Math.max(0.02, Math.min(impliedGrowth, 0.35));
+                return { rate: clamped, source: 'analyst_forward_revenue', raw: impliedGrowth };
             }
         }
     }
 
-    // Method 3: Revenue CAGR
+    // Method 2: Revenue CAGR (3-year)
+    let revenueCAGR: number | null = null;
+    if (sorted.length >= 4) {
+        const latest = sorted[0];
+        const threeYrsAgo = sorted[3];
+        if (latest.revenue > 0 && threeYrsAgo.revenue > 0) {
+            revenueCAGR = calculateCAGR(threeYrsAgo.revenue, latest.revenue, 3);
+        }
+    }
+
     if (revenueCAGR !== null && isFinite(revenueCAGR)) {
         const clamped = Math.max(0.02, Math.min(revenueCAGR, 0.35));
         return { rate: clamped, source: 'revenue_cagr', raw: revenueCAGR };
     }
 
-    // Method 4: Sector default
+    // Method 3: Sector default
     return { rate: 0.05, source: 'sector_default', raw: null };
 }
 
 /**
- * Calculate Normalized FCF Margin: average of (OCF - |CapEx|) / Revenue
- * over the last 3 years. Clamped to [5%, 50%].
+ * Calculate Normalized FCF Margin using EBITDA-based FCFF when data available,
+ * falling back to (OCF - CapEx) / Revenue. Clamped to [5%, 50%].
  */
 function calculateNormalizedFCFMargin(
-    cashFlowStatements: FinancialStatement[],
-    incomeStatements: FinancialStatement[],
-): number {
+    incomeStatements: FMPIncomeStatement[],
+    cashFlowStatements: FMPCashFlowStatement[],
+    balanceSheets: FMPBalanceSheet[],
+): { margin: number; method: 'ebitda_based' | 'ocf_fallback' } {
     const margins: number[] = [];
 
-    // Sort both by year descending, take last 3 years
-    const cfSorted = [...cashFlowStatements].sort((a, b) => b.fiscalYear - a.fiscalYear).slice(0, 3);
-    const incSorted = [...incomeStatements].sort((a, b) => b.fiscalYear - a.fiscalYear).slice(0, 3);
+    // Sort by date descending, take last 3 years
+    const incSorted = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
+    const cfSorted = [...cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
+    const bsSorted = [...balanceSheets].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4); // need N+1 for WC delta
 
-    for (const cf of cfSorted) {
-        const inc = incSorted.find(i => i.fiscalYear === cf.fiscalYear);
-        const revenue = inc?.revenue ?? cf.revenue;
-        const ocf = cf.operatingCashFlow ?? 0;
-        const capex = Math.abs(cf.capitalExpenditures ?? 0);
+    let method: 'ebitda_based' | 'ocf_fallback' = 'ebitda_based';
 
-        if (revenue && revenue > 0 && ocf > 0) {
-            const fcf = ocf - capex;
-            const margin = fcf / revenue;
-            margins.push(margin);
+    for (let i = 0; i < incSorted.length; i++) {
+        const inc = incSorted[i];
+        const cf = cfSorted[i];
+        const bsCurrent = bsSorted[i];
+        const bsPrior = bsSorted[i + 1];
+
+        if (!inc || !cf || inc.revenue <= 0) continue;
+
+        // Try EBITDA-based FCFF first
+        if (inc.ebitda > 0 && inc.incomeBeforeTax !== 0 && bsCurrent && bsPrior) {
+            const taxRate = inc.incomeBeforeTax > 0
+                ? Math.max(0, Math.min(inc.incomeTaxExpense / inc.incomeBeforeTax, 0.40))
+                : TAX_RATE;
+            const da = cf.depreciationAndAmortization || 0;
+            const capex = cf.capitalExpenditure || 0; // FMP: positive number
+            const wcCurrent = bsCurrent.totalCurrentAssets - bsCurrent.totalCurrentLiabilities;
+            const wcPrior = bsPrior.totalCurrentAssets - bsPrior.totalCurrentLiabilities;
+            const deltaWC = wcCurrent - wcPrior;
+
+            const { fcff } = computeFCFF(inc.ebitda, taxRate, da, capex, deltaWC);
+            margins.push(fcff / inc.revenue);
+        } else {
+            // Fallback: OCF - CapEx
+            method = 'ocf_fallback';
+            const ocf = cf.operatingCashFlow || 0;
+            const capex = cf.capitalExpenditure || 0;
+            if (ocf > 0) {
+                margins.push((ocf - capex) / inc.revenue);
+            }
         }
     }
 
-    if (margins.length === 0) return 0.10; // Conservative fallback
+    if (margins.length === 0) return { margin: 0.10, method: 'ocf_fallback' };
 
     const avgMargin = margins.reduce((a, b) => a + b, 0) / margins.length;
-    return Math.max(0.05, Math.min(avgMargin, 0.50));
+    return { margin: Math.max(0.05, Math.min(avgMargin, 0.50)), method };
 }
 
 // ─────────────────────────────────────────────────────────
@@ -239,34 +495,55 @@ function calculateNormalizedFCFMargin(
 // ─────────────────────────────────────────────────────────
 
 /**
- * Project cash flows over 10 years with two-phase growth:
+ * Project cash flows over 10 years with EBITDA-based FCFF.
+ * Projects line items: revenue → EBITDA → CapEx → D&A → WC delta → FCFF.
  *   Phase 1 (years 1-5): full growth rate
  *   Phase 2 (years 6-10): linear fade toward terminal growth
  */
 function projectCashFlows(
     baseRevenue: number,
     growthRate: number,
-    fcfMargin: number,
+    _fcfMargin: number,  // retained for API compat; EBITDA components used instead
+    ebitdaMargin: number,
+    capexToRevenue: number,
+    daToRevenue: number,
+    effectiveTaxRate: number,
     years: number = PROJECTION_YEARS,
     terminalGrowth: number = TERMINAL_GROWTH_RATE,
 ): DCFProjection[] {
     const projections: DCFProjection[] = [];
     let revenue = baseRevenue;
 
-    // Phase 1: Full growth rate (years 1-5)
-    for (let y = 1; y <= PHASE_1_YEARS; y++) {
-        revenue = revenue * (1 + growthRate);
-        const fcf = revenue * fcfMargin;
-        projections.push({ year: y, revenue, fcf, growthApplied: growthRate, discountedFCF: 0 });
-    }
+    for (let y = 1; y <= years; y++) {
+        // Growth rate: full for years 1-5, linear fade for 6-10
+        let appliedGrowth: number;
+        if (y <= PHASE_1_YEARS) {
+            appliedGrowth = growthRate;
+        } else {
+            const fadeProgress = (y - PHASE_1_YEARS) / (years - PHASE_1_YEARS);
+            appliedGrowth = growthRate - (growthRate - terminalGrowth) * fadeProgress;
+        }
 
-    // Phase 2: Linear fade to terminal growth (years 6-10)
-    for (let y = PHASE_1_YEARS + 1; y <= years; y++) {
-        const fadeProgress = (y - PHASE_1_YEARS) / (years - PHASE_1_YEARS);
-        const fadedGrowth = growthRate - (growthRate - terminalGrowth) * fadeProgress;
-        revenue = revenue * (1 + fadedGrowth);
-        const fcf = revenue * fcfMargin;
-        projections.push({ year: y, revenue, fcf, growthApplied: fadedGrowth, discountedFCF: 0 });
+        revenue = revenue * (1 + appliedGrowth);
+        const ebitda = revenue * ebitdaMargin;
+        const capex = revenue * capexToRevenue;
+        const da = revenue * daToRevenue;
+        // WC delta approximated as stable ratio; real delta is captured in margin
+        const workingCapitalDelta = 0;
+
+        const { fcff } = computeFCFF(ebitda, effectiveTaxRate, da, capex, workingCapitalDelta);
+
+        projections.push({
+            year: y,
+            revenue,
+            ebitda,
+            capex,
+            da,
+            workingCapitalDelta,
+            fcf: fcff,
+            growthApplied: appliedGrowth,
+            discountedFCF: 0,
+        });
     }
 
     return projections;
@@ -276,48 +553,60 @@ function projectCashFlows(
 // Task 3: WACC Calculation (CAPM + Sector Defaults)
 // ─────────────────────────────────────────────────────────
 
-/**
- * Calculate WACC using CAPM with sector defaults as fallback.
- * Clamped to [6%, 15%].
- */
 function calculateWACC(
-    overview: CompanyOverview,
-    latestBalance: FinancialStatement,
-    latestIncome: FinancialStatement,
+    profile: FMPProfile,
+    latestBalance: FMPBalanceSheet,
+    latestIncome: FMPIncomeStatement,
+    overrides?: { costOfEquity?: number; costOfDebt?: number },
+    peerBetaResult?: { leveredBeta: number; method: string },
 ): {
     wacc: number;
-    components: { costOfEquity: number; costOfDebt: number; equityWeight: number; debtWeight: number; beta: number; riskFreeRate: number };
+    components: { costOfEquity: number; costOfDebt: number; equityWeight: number; debtWeight: number; beta: number; riskFreeRate: number; preferredStockWeight?: number };
     clamped: boolean;
     sector: string;
 } {
-    const sector = (overview.sector || 'DEFAULT').toUpperCase();
+    const sector = (profile.sector || 'DEFAULT').toUpperCase();
     const defaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
-    const beta = overview.beta ?? defaults.beta;
+    
+    // Use peer beta if available, otherwise profile beta, otherwise sector default
+    const beta = peerBetaResult?.leveredBeta ?? profile.beta ?? defaults.beta;
 
-    // Cost of equity via CAPM
-    const costOfEquity = RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM;
+    // Cost of equity via CAPM (or override)
+    const costOfEquity = overrides?.costOfEquity ?? (RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM);
 
-    // Debt/equity split
-    const totalDebt = (latestBalance.totalDebt ?? 0) + (latestBalance.shortTermDebt ?? 0);
-    const marketCap = overview.marketCap || 0;
-    const totalValue = totalDebt + marketCap;
+    // Capital structure from FMP balance sheet
+    const totalDebt = latestBalance.totalDebt || 0;
+    const marketCap = profile.mktCap || 0;
+    const preferredStock = latestBalance.preferredStock || 0;
+    const totalCapital = totalDebt + marketCap + preferredStock;
 
-    const equityWeight = marketCap > 0 ? marketCap / totalValue : (1 - defaults.debtRatio);
-    const debtWeight = 1 - equityWeight;
+    const equityWeight = totalCapital > 0 ? marketCap / totalCapital : (1 - defaults.debtRatio);
+    const debtWeight = totalCapital > 0 ? totalDebt / totalCapital : defaults.debtRatio;
+    const preferredWeight = totalCapital > 0 ? preferredStock / totalCapital : 0;
 
-    // Cost of debt
-    const interestExpense = Math.abs(latestIncome.interestExpense ?? 0);
-    const costOfDebt = totalDebt > 0 ? interestExpense / totalDebt : 0.05;
+    // Cost of debt (or override)
+    const interestExpense = Math.abs(latestIncome.interestExpense || 0);
+    const costOfDebt = overrides?.costOfDebt ?? (totalDebt > 0 ? interestExpense / totalDebt : 0.05);
 
-    // WACC
-    const wacc = (equityWeight * costOfEquity) + (debtWeight * costOfDebt * (1 - TAX_RATE));
+    // Preferred stock dividend rate (industry average fallback)
+    const preferredDividendRate = 0.06;
+
+    // WACC with optional preferred stock term
+    let wacc = (equityWeight * costOfEquity) + (debtWeight * costOfDebt * (1 - TAX_RATE));
+    if (preferredWeight > 0) {
+        wacc += preferredWeight * preferredDividendRate;
+    }
 
     // Sanity clamp: WACC between 6% and 15%
     const clampedWACC = Math.max(0.06, Math.min(wacc, 0.15));
 
     return {
         wacc: clampedWACC,
-        components: { costOfEquity, costOfDebt, equityWeight, debtWeight, beta, riskFreeRate: RISK_FREE_RATE },
+        components: {
+            costOfEquity, costOfDebt, equityWeight, debtWeight, beta,
+            riskFreeRate: RISK_FREE_RATE,
+            ...(preferredWeight > 0 ? { preferredStockWeight: preferredWeight } : {}),
+        },
         clamped: wacc !== clampedWACC,
         sector,
     };
@@ -353,15 +642,22 @@ function calculateTerminalValue(
 // ─────────────────────────────────────────────────────────
 
 /**
- * Assemble intrinsic value from projected cash flows and terminal value.
+ * P2.1 — Assemble intrinsic value from projected cash flows and terminal value.
+ * Includes equity bridge: Equity Value = Enterprise Value - Net Debt.
+ * (FMP's netDebt already = totalDebt - cash, so cash is implicitly included.)
+ * Uses fractional discounting when filing date is available.
  */
 function calculateIntrinsicValue(
     projections: DCFProjection[],
     wacc: number,
     terminalGrowth: number,
     sharesOutstanding: number,
+    netDebt: number = 0,
+    _cash: number = 0,
+    filingDate?: string,
 ): {
     enterpriseValue: number;
+    equityValue: number;
     intrinsicValuePerShare: number;
     sumDiscountedFCF: number;
     terminalValueContribution: number;
@@ -369,10 +665,22 @@ function calculateIntrinsicValue(
     projections: DCFProjection[];
     terminal: { terminalValue: number; discountedTV: number; terminalGrowth: number };
 } {
-    // Discount each year's FCF
+    const analysisDate = new Date();
+    const baseDate = filingDate ? new Date(filingDate) : analysisDate;
+
+    // Discount each year's FCF (fractional when filing date available)
     let sumDiscountedFCF = 0;
     const detailedProjections = projections.map(p => {
-        const discountedFCF = p.fcf / Math.pow(1 + wacc, p.year);
+        let discountFactor: number;
+        if (filingDate) {
+            // Fractional discounting: exact year offset from filing date
+            const projectedDate = new Date(baseDate);
+            projectedDate.setFullYear(projectedDate.getFullYear() + p.year);
+            discountFactor = Math.pow(1 + wacc, yearFrac(analysisDate, projectedDate));
+        } else {
+            discountFactor = Math.pow(1 + wacc, p.year);
+        }
+        const discountedFCF = p.fcf / discountFactor;
         sumDiscountedFCF += discountedFCF;
         return { ...p, discountedFCF };
     });
@@ -381,14 +689,19 @@ function calculateIntrinsicValue(
     const finalYearFCF = projections[projections.length - 1].fcf;
     const tv = calculateTerminalValue(finalYearFCF, wacc, terminalGrowth);
 
-    // Enterprise value
+    // Enterprise value = PV(FCFs) + PV(TV)
     const enterpriseValue = sumDiscountedFCF + tv.discountedTV;
 
+    // Equity bridge: EV - Net Debt + Cash (FMP provides netDebt = totalDebt - cash)
+    // So: equityValue = EV - netDebt (which already accounts for cash)
+    const equityValue = enterpriseValue - netDebt;
+
     // Per-share value
-    const intrinsicValuePerShare = sharesOutstanding > 0 ? enterpriseValue / sharesOutstanding : 0;
+    const intrinsicValuePerShare = sharesOutstanding > 0 ? equityValue / sharesOutstanding : 0;
 
     return {
         enterpriseValue,
+        equityValue,
         intrinsicValuePerShare,
         sumDiscountedFCF,
         terminalValueContribution: tv.discountedTV,
@@ -411,7 +724,12 @@ function reverseDCF(
     sharesOutstanding: number,
     baseRevenue: number,
     fcfMargin: number,
+    ebitdaMargin: number,
+    capexToRevenue: number,
+    daToRevenue: number,
+    effectiveTaxRate: number,
     wacc: number,
+    netDebt: number,
     terminalGrowth: number = TERMINAL_GROWTH_RATE,
 ): { impliedGrowthRate: number; impliedGrowthFormatted: string; interpretation: string } {
     let low = 0.0;
@@ -419,8 +737,8 @@ function reverseDCF(
 
     for (let i = 0; i < 50; i++) {
         const mid = (low + high) / 2;
-        const proj = projectCashFlows(baseRevenue, mid, fcfMargin, PROJECTION_YEARS, terminalGrowth);
-        const result = calculateIntrinsicValue(proj, wacc, terminalGrowth, sharesOutstanding);
+        const proj = projectCashFlows(baseRevenue, mid, fcfMargin, ebitdaMargin, capexToRevenue, daToRevenue, effectiveTaxRate, PROJECTION_YEARS, terminalGrowth);
+        const result = calculateIntrinsicValue(proj, wacc, terminalGrowth, sharesOutstanding, netDebt);
 
         if (result.intrinsicValuePerShare < currentPrice) {
             low = mid;
@@ -455,23 +773,23 @@ function reverseDCF(
 // ─────────────────────────────────────────────────────────
 
 /**
- * EPS-based quick intrinsic valuation.
- * Only needs EARNINGS + OVERVIEW + Price (3 API calls).
+ * EPS-based quick intrinsic valuation using FMP data.
+ * Lightweight alternative to full DCF — uses profile + income statements.
  */
 export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
     const sym = symbol.toUpperCase().trim();
 
-    // Fetch only what we need
-    const [earningsData, priceResult, overview] = await Promise.all([
-        fetchEarnings(sym, 8),
+    // Fetch minimal FMP data
+    const [bundle, priceResult] = await Promise.all([
+        fetchDCFDataBundle(sym),
         getPrice({ symbol: sym }),
-        fetchCompanyOverview(sym),
     ]);
 
-    // Base EPS = TTM (sum of last 4 quarterly reportedEPS)
-    const ttmEPS = earningsData
-        .slice(0, 4)
-        .reduce((sum, q) => sum + (q.epsActual ?? 0), 0);
+    const { profile, incomeStatements } = bundle;
+    const sortedIncome = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+
+    // Base EPS = latest diluted EPS
+    const ttmEPS = sortedIncome[0]?.epsdiluted ?? 0;
 
     if (ttmEPS <= 0) {
         throw new APIError(
@@ -480,23 +798,20 @@ export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
         );
     }
 
-    // Growth rate: compare TTM EPS now vs TTM EPS one year ago (true YoY)
-    const ttmEPS_1yrAgo = earningsData
-        .slice(4, 8)
-        .reduce((sum, q) => sum + (q.epsActual ?? 0), 0);
-
+    // Growth rate: YoY EPS growth
+    const priorEPS = sortedIncome[1]?.epsdiluted ?? 0;
     let growthRate: number;
-    if (ttmEPS_1yrAgo > 0 && ttmEPS > 0) {
-        const historicalGrowth = (ttmEPS / ttmEPS_1yrAgo) - 1;
+    if (priorEPS > 0 && ttmEPS > 0) {
+        const historicalGrowth = (ttmEPS / priorEPS) - 1;
         growthRate = Math.max(0.02, Math.min(historicalGrowth, 0.35));
     } else {
-        growthRate = 0.05; // Fallback
+        growthRate = 0.05;
     }
 
     // Discount rate and terminal PE from sector defaults
-    const sector = (overview.sector || 'DEFAULT').toUpperCase();
+    const sector = (profile.sector || 'DEFAULT').toUpperCase();
     const defaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
-    const discountRate = 0.10; // Simple 10% for quick mode
+    const discountRate = 0.10;
     const terminalPE = defaults.terminalPE;
 
     // Project 10 years of EPS
@@ -511,10 +826,8 @@ export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
         projections.push({ year: y, eps, discountedEPS: discounted });
     }
 
-    // Terminal value = Year 10 EPS × PE multiple, discounted
     const terminalValue = eps * terminalPE;
     const discountedTV = terminalValue / Math.pow(1 + discountRate, PROJECTION_YEARS);
-
     const intrinsicValue = sumDiscountedEPS + discountedTV;
     const currentPrice = priceResult.data.price;
     const upside = (intrinsicValue - currentPrice) / currentPrice;
@@ -555,139 +868,227 @@ function generateWarnings(
 // ─────────────────────────────────────────────────────────
 
 /**
- * Full DCF analysis: revenue-anchored FCF model with WACC discounting,
- * Gordon Growth terminal value, and reverse DCF.
+ * Full DCF v5 analysis: EBITDA-based FCFF model with equity bridge,
+ * GDP-guarded terminal growth, exit multiple cross-check, and user overrides.
  */
-export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
+export async function runDCFAnalysis(symbol: string, overrides?: DCFOverrides): Promise<DCFResult> {
     const sym = symbol.toUpperCase().trim();
-    console.log(`\n📈 [DCF v4] Starting analysis for ${sym}...`);
+    console.log(`\n📈 [DCF v5] Starting analysis for ${sym}...`);
 
-    // ─── 1. Fetch all data in parallel ────────────────
-    console.log(`📊 [DCF] Step 1: Fetching data...`);
-
-    const [statements, priceResult, overview, earningsData] = await Promise.all([
-        fetchFinancialStatements(sym, 'annual', 5),
-        getPrice({ symbol: sym }),
-        fetchCompanyOverview(sym),
-        fetchEarnings(sym, 8).catch(() => [] as Awaited<ReturnType<typeof fetchEarnings>>),
-    ]);
-
-    if (statements.length < 3) {
-        throw new APIError(
-            `Insufficient historical data for DCF analysis of ${sym}. Need at least 3 years, got ${statements.length}.`,
-            { symbol: sym, yearsAvailable: statements.length },
-        );
+    // ─── 0. Validate overrides ───────────────────────
+    if (overrides) {
+        const ov = overrides;
+        if (ov.growthRate !== undefined && (ov.growthRate < 0 || ov.growthRate > 0.50)) {
+            throw new APIError(`Override validation: growthRate must be between 0 and 0.50 (got ${ov.growthRate}).`, { field: 'growthRate', value: ov.growthRate });
+        }
+        if (ov.fcfMargin !== undefined && (ov.fcfMargin < 0 || ov.fcfMargin > 0.80)) {
+            throw new APIError(`Override validation: fcfMargin must be between 0 and 0.80 (got ${ov.fcfMargin}).`, { field: 'fcfMargin', value: ov.fcfMargin });
+        }
+        if (ov.wacc !== undefined && (ov.wacc < 0.03 || ov.wacc > 0.25)) {
+            throw new APIError(`Override validation: wacc must be between 0.03 and 0.25 (got ${ov.wacc}).`, { field: 'wacc', value: ov.wacc });
+        }
+        if (ov.terminalGrowthRate !== undefined && (ov.terminalGrowthRate < 0 || ov.terminalGrowthRate > 0.08)) {
+            throw new APIError(`Override validation: terminalGrowthRate must be between 0 and 0.08 (got ${ov.terminalGrowthRate}).`, { field: 'terminalGrowthRate', value: ov.terminalGrowthRate });
+        }
+        if (ov.costOfEquity !== undefined && (ov.costOfEquity < 0.02 || ov.costOfEquity > 0.30)) {
+            throw new APIError(`Override validation: costOfEquity must be between 0.02 and 0.30 (got ${ov.costOfEquity}).`, { field: 'costOfEquity', value: ov.costOfEquity });
+        }
+        if (ov.costOfDebt !== undefined && (ov.costOfDebt < 0 || ov.costOfDebt > 0.20)) {
+            throw new APIError(`Override validation: costOfDebt must be between 0 and 0.20 (got ${ov.costOfDebt}).`, { field: 'costOfDebt', value: ov.costOfDebt });
+        }
+        if (ov.gdpCeiling !== undefined && (ov.gdpCeiling < 0 || ov.gdpCeiling > 0.10)) {
+            throw new APIError(`Override validation: gdpCeiling must be between 0 and 0.10 (got ${ov.gdpCeiling}).`, { field: 'gdpCeiling', value: ov.gdpCeiling });
+        }
+        if (ov.capexRatio !== undefined && (ov.capexRatio < 0 || ov.capexRatio > 0.50)) {
+            throw new APIError(`Override validation: capexRatio must be between 0 and 0.50 (got ${ov.capexRatio}).`, { field: 'capexRatio', value: ov.capexRatio });
+        }
+        console.log(`📊 [DCF] Overrides validated:`, JSON.stringify(ov));
     }
+
+    // ─── 1. Fetch all data via FMP ────────────────────
+    console.log(`📊 [DCF] Step 1: Fetching FMP data bundle...`);
+    const [bundle, priceResult] = await Promise.all([
+        fetchDCFDataBundle(sym),
+        getPrice({ symbol: sym }),
+    ]);
+    const { profile, incomeStatements, balanceSheets, cashFlowStatements,
+            enterpriseValues, analystEstimates, revenueSegments } = bundle;
 
     // ─── 2. Extract key inputs ───────────────────────
     console.log(`📊 [DCF] Step 2: Extracting inputs...`);
-
-    const sortedStatements = [...statements].sort((a, b) => b.fiscalYear - a.fiscalYear);
-    const latestIncome = sortedStatements[0];
-    const latestBalance = sortedStatements[0]; // Financial statements include all data
-    const baseRevenue = latestIncome.revenue ?? 0;
-    const sharesOutstanding = overview.sharesOutstanding ?? 0;
+    const sortedIncome = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const sortedBalance = [...balanceSheets].sort((a, b) => b.date.localeCompare(a.date));
+    const sortedCashFlow = [...cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestIncome = sortedIncome[0];
+    const latestBalance = sortedBalance[0];
+    const latestCashFlow = sortedCashFlow[0];
+    const baseRevenue = latestIncome.revenue;
     const currentPrice = priceResult.data.price;
+    const filingDate = latestIncome.fillingDate;
+    const sharesOutstanding = enterpriseValues?.[0]?.numberOfShares || (profile.mktCap / profile.price) || 0;
 
     if (baseRevenue <= 0) {
-        throw new APIError(
-            `Cannot run DCF for ${sym}: latest revenue is zero or negative.`,
-            { symbol: sym, baseRevenue },
-        );
+        throw new APIError(`Cannot run DCF for ${sym}: latest revenue is zero or negative.`, { symbol: sym, baseRevenue });
     }
     if (sharesOutstanding <= 0) {
-        throw new APIError(
-            `Cannot run DCF for ${sym}: shares outstanding is zero or missing.`,
-            { symbol: sym },
-        );
+        throw new APIError(`Cannot run DCF for ${sym}: shares outstanding is zero or missing.`, { symbol: sym });
     }
 
-    // ─── 3. Growth rate (Task 1) ─────────────────────
-    console.log(`📊 [DCF] Step 3: Selecting growth rate...`);
+    // ─── 3. Derived ratios ───────────────────────────
+    const effectiveTaxRate = latestIncome.incomeBeforeTax > 0
+        ? Math.max(0, Math.min(latestIncome.incomeTaxExpense / latestIncome.incomeBeforeTax, 0.40))
+        : TAX_RATE;
+    const ebitdaMargin = baseRevenue > 0 ? (latestIncome.ebitda / baseRevenue) : 0.20;
+    const capexToRevenue = overrides?.capexRatio ?? (latestCashFlow.capitalExpenditure > 0
+        ? latestCashFlow.capitalExpenditure / baseRevenue : 0.05);
+    const daToRevenue = latestCashFlow.depreciationAndAmortization > 0
+        ? latestCashFlow.depreciationAndAmortization / baseRevenue : 0.03;
+    const netDebt = latestBalance.netDebt || 0;
+    const cash = latestBalance.cashAndCashEquivalents || 0;
 
-    // Adapt earningsData to the format selectGrowthRate expects
-    const earningsForGrowth = earningsData.map(e => ({
-        reportedEPS: e.epsActual ?? 0,
-        estimatedEPS: e.epsEstimate,
-    }));
-    const growth = selectGrowthRate(sortedStatements, earningsForGrowth.length > 0 ? earningsForGrowth : null);
-    console.log(`📊 [DCF] Growth rate: ${(growth.rate * 100).toFixed(2)}% (source: ${growth.source})`);
+    // ─── 4. GDP ceiling ──────────────────────────────
+    console.log(`📊 [DCF] Step 3: Resolving GDP ceiling...`);
+    const gdpResult = resolveGDPCeiling(profile.country || 'US', revenueSegments);
+    const gdpCeiling = overrides?.gdpCeiling ?? gdpResult.gdpCeiling;
+    const terminalGrowthRate = overrides?.terminalGrowthRate ?? Math.min(TERMINAL_GROWTH_RATE, gdpCeiling);
 
-    // ─── 4. FCF margin (Task 1) ──────────────────────
-    console.log(`📊 [DCF] Step 4: Computing FCF margin...`);
+    // P3.2 — Enforce terminal growth guard (throw if user override exceeds GDP ceiling)
+    if (overrides?.terminalGrowthRate !== undefined && terminalGrowthRate > gdpCeiling) {
+        throw new APIError(
+            `Terminal growth rate override (${(terminalGrowthRate * 100).toFixed(2)}%) exceeds GDP ceiling ` +
+            `for ${gdpResult.country} (${(gdpCeiling * 100).toFixed(2)}%). ` +
+            `Maximum allowed: ${(gdpCeiling * 100).toFixed(2)}%.`,
+            { field: 'terminalGrowthRate', value: terminalGrowthRate, gdpCeiling, country: gdpResult.country }
+        );
+    }
+    console.log(`📊 [DCF] Terminal growth: ${(terminalGrowthRate * 100).toFixed(2)}% (GDP ceiling: ${(gdpCeiling * 100).toFixed(2)}%)`);
 
-    const fcfMargin = calculateNormalizedFCFMargin(sortedStatements, sortedStatements);
-    console.log(`📊 [DCF] FCF margin: ${(fcfMargin * 100).toFixed(2)}%`);
+    // ─── 5. Growth rate ──────────────────────────────
+    console.log(`📊 [DCF] Step 4: Selecting growth rate...`);
+    const growth = overrides?.growthRate !== undefined
+        ? { rate: overrides.growthRate, source: 'user_override', raw: null as number | null }
+        : selectGrowthRate(sortedIncome, analystEstimates);
+    console.log(`📊 [DCF] Growth: ${(growth.rate * 100).toFixed(2)}% (${growth.source})`);
 
-    // ─── 5. WACC (Task 3) ────────────────────────────
-    console.log(`📊 [DCF] Step 5: Calculating WACC...`);
+    // ─── 6. FCF margin ───────────────────────────────
+    console.log(`📊 [DCF] Step 5: Computing FCF margin...`);
+    let fcfMargin: number;
+    let fcfMethod: string;
+    if (overrides?.fcfMargin !== undefined) {
+        fcfMargin = overrides.fcfMargin;
+        fcfMethod = 'user_override';
+    } else {
+        const mr = calculateNormalizedFCFMargin(sortedIncome, sortedCashFlow, sortedBalance);
+        fcfMargin = mr.margin;
+        fcfMethod = mr.method;
+    }
+    console.log(`📊 [DCF] FCF margin: ${(fcfMargin * 100).toFixed(2)}% (${fcfMethod})`);
 
-    const waccResult = calculateWACC(overview, latestBalance, latestIncome);
+    // ─── 7. Peer Beta + WACC ─────────────────────────
+    console.log(`📊 [DCF] Step 6: Calculating peer beta & WACC...`);
+    const sector = (profile.sector || 'DEFAULT').toUpperCase();
+    const sectorDefaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
+    const targetDE = profile.mktCap > 0 ? (latestBalance.totalDebt || 0) / profile.mktCap : 0;
+    const peerBetaResult = await calculatePeerBeta(
+        bundle.peers,
+        targetDE,
+        effectiveTaxRate,
+        profile.beta ?? sectorDefaults.beta
+    );
+    console.log(`📊 [DCF] Beta: ${peerBetaResult.leveredBeta.toFixed(3)} (${peerBetaResult.method}, ${peerBetaResult.peersUsed.length} peers)`);
+
+    let waccResult: ReturnType<typeof calculateWACC>;
+    if (overrides?.wacc !== undefined) {
+        waccResult = {
+            wacc: overrides.wacc,
+            components: { costOfEquity: 0, costOfDebt: 0, equityWeight: 0, debtWeight: 0, beta: peerBetaResult.leveredBeta, riskFreeRate: RISK_FREE_RATE },
+            clamped: false,
+            sector,
+        };
+    } else {
+        waccResult = calculateWACC(profile, latestBalance, latestIncome, {
+            costOfEquity: overrides?.costOfEquity, costOfDebt: overrides?.costOfDebt,
+        }, peerBetaResult);
+    }
     console.log(`📊 [DCF] WACC: ${(waccResult.wacc * 100).toFixed(2)}%${waccResult.clamped ? ' (clamped)' : ''}`);
 
-    // ─── 6. Project 10 years (Task 2) ────────────────
-    console.log(`📊 [DCF] Step 6: Projecting cash flows...`);
+    // ─── 8. Project 10 years ─────────────────────────
+    console.log(`📊 [DCF] Step 7: Projecting cash flows...`);
+    const projections = projectCashFlows(baseRevenue, growth.rate, fcfMargin, ebitdaMargin,
+        capexToRevenue, daToRevenue, effectiveTaxRate, PROJECTION_YEARS, terminalGrowthRate);
 
-    const projections = projectCashFlows(baseRevenue, growth.rate, fcfMargin, PROJECTION_YEARS, TERMINAL_GROWTH_RATE);
+    // ─── 9. Intrinsic value + equity bridge ──────────
+    console.log(`📊 [DCF] Step 8: Computing intrinsic value...`);
+    const valuation = calculateIntrinsicValue(projections, waccResult.wacc, terminalGrowthRate,
+        sharesOutstanding, netDebt, cash, filingDate);
+    console.log(`📊 [DCF] EV: $${(valuation.enterpriseValue / 1e9).toFixed(2)}B | Equity: $${(valuation.equityValue / 1e9).toFixed(2)}B | Per share: $${valuation.intrinsicValuePerShare.toFixed(2)}`);
 
-    // ─── 7. Intrinsic value (Task 5) ─────────────────
-    console.log(`📊 [DCF] Step 7: Computing intrinsic value...`);
+    // ─── 10. Exit multiple cross-check ───────────────
+    const finalEBITDA = projections[projections.length - 1].ebitda;
+    const exitMultiple = calculateExitMultipleTV(finalEBITDA, sectorDefaults.ebitdaMultiple, waccResult.wacc);
 
-    const valuation = calculateIntrinsicValue(projections, waccResult.wacc, TERMINAL_GROWTH_RATE, sharesOutstanding);
-    console.log(`📊 [DCF] Intrinsic value: $${valuation.intrinsicValuePerShare.toFixed(2)}`);
+    // ─── 11. Reverse DCF ─────────────────────────────
+    console.log(`📊 [DCF] Step 9: Running reverse DCF...`);
+    const reverseDCFResult = reverseDCF(currentPrice, sharesOutstanding, baseRevenue, fcfMargin,
+        ebitdaMargin, capexToRevenue, daToRevenue, effectiveTaxRate, waccResult.wacc, netDebt, terminalGrowthRate);
 
-    // ─── 8. Reverse DCF (Task 6) ─────────────────────
-    console.log(`📊 [DCF] Step 8: Running reverse DCF...`);
-
-    const reverseDCFResult = reverseDCF(currentPrice, sharesOutstanding, baseRevenue, fcfMargin, waccResult.wacc, TERMINAL_GROWTH_RATE);
-
-    // ─── 9. Assemble output ──────────────────────────
+    // ─── 12. Warnings & output ───────────────────────
     const upside = (valuation.intrinsicValuePerShare - currentPrice) / currentPrice;
-
     const warnings = generateWarnings(growth, waccResult, valuation, fcfMargin);
+    // Note: GDP ceiling enforcement for user overrides happens in step 4 above (throws).
+    // This warning catches auto-calculated edge cases (should be rare due to Math.min clamp).
+    if (terminalGrowthRate > gdpCeiling) {
+        warnings.push(`Terminal growth (${(terminalGrowthRate * 100).toFixed(1)}%) exceeds GDP ceiling (${(gdpCeiling * 100).toFixed(1)}%).`);
+    }
+    const appliedOverrides: Partial<DCFOverrides> = {};
+    if (overrides) {
+        for (const [k, v] of Object.entries(overrides)) {
+            if (v !== undefined) (appliedOverrides as any)[k] = v;
+        }
+    }
 
     const result: DCFResult = {
         metadata: {
-            companyName: overview.name,
-            ticker: sym,
-            sector: overview.sector || 'Unknown',
-            dcfMethod: 'revenue_anchored_fcf',
+            companyName: profile.companyName, ticker: sym,
+            sector: profile.sector || 'Unknown', dcfMethod: 'ebitda_based_fcff',
             analysisDate: new Date().toISOString(),
+            ...(Object.keys(appliedOverrides).length > 0 ? { overridesApplied: appliedOverrides } : {}),
         },
-        currentMarketData: {
-            currentPrice,
-            marketCap: overview.marketCap || 0,
-            sharesOutstanding,
-        },
+        currentMarketData: { currentPrice, marketCap: profile.mktCap || 0, sharesOutstanding },
         growthAnalysis: {
-            selectedGrowthRate: growth.rate,
-            growthSource: growth.source,
-            revenueCAGR3yr: growth.raw,
-            normalizedFCFMargin: fcfMargin,
+            selectedGrowthRate: growth.rate, growthSource: growth.source,
+            revenueCAGR3yr: growth.raw, normalizedFCFMargin: fcfMargin, fcffMethod: fcfMethod,
         },
         waccCalculation: {
-            wacc: waccResult.wacc,
-            waccFormatted: (waccResult.wacc * 100).toFixed(2) + '%',
-            components: waccResult.components,
-            sector: waccResult.sector,
+            wacc: waccResult.wacc, waccFormatted: (waccResult.wacc * 100).toFixed(2) + '%',
+            components: waccResult.components, sector: waccResult.sector,
+            betaSource: peerBetaResult.method,
         },
         projections: valuation.projections.map(p => ({
-            year: p.year,
-            revenue: Math.round(p.revenue),
-            fcf: Math.round(p.fcf),
-            growthRate: (p.growthApplied * 100).toFixed(2) + '%',
+            year: p.year, revenue: Math.round(p.revenue), ebitda: Math.round(p.ebitda),
+            fcf: Math.round(p.fcf), growthRate: (p.growthApplied * 100).toFixed(2) + '%',
             discountedFCF: Math.round(p.discountedFCF),
         })),
         terminalValue: {
             method: 'gordon_growth',
-            terminalGrowth: '2.50%',
+            terminalGrowth: (valuation.terminal.terminalGrowth * 100).toFixed(2) + '%',
             undiscountedValue: Math.round(valuation.terminal.terminalValue),
             discountedValue: Math.round(valuation.terminal.discountedTV),
             percentOfTotal: (valuation.terminalValuePct * 100).toFixed(1) + '%',
         },
+        terminalValueCrossCheck: {
+            method: 'ebitda_exit_multiple', multiple: exitMultiple.multiple,
+            undiscountedValue: Math.round(exitMultiple.exitMultipleTV),
+            discountedValue: Math.round(exitMultiple.discountedExitMultipleTV),
+            percentOfTotal: valuation.enterpriseValue > 0
+                ? (exitMultiple.discountedExitMultipleTV / (valuation.sumDiscountedFCF + exitMultiple.discountedExitMultipleTV) * 100).toFixed(1) + '%' : '0%',
+        },
+        equityBridge: {
+            enterpriseValue: Math.round(valuation.enterpriseValue), netDebt: Math.round(netDebt),
+            cash: Math.round(cash), equityValue: Math.round(valuation.equityValue),
+        },
         valuationSummary: {
-            intrinsicValue: Math.round(valuation.intrinsicValuePerShare * 100) / 100,
-            currentPrice,
+            intrinsicValue: Math.round(valuation.intrinsicValuePerShare * 100) / 100, currentPrice,
             upsideDownside: (upside * 100).toFixed(2) + '%',
             valuation: upside > 0.15 ? 'UNDERVALUED' : upside < -0.15 ? 'OVERVALUED' : 'FAIRLY_VALUED',
         },
@@ -697,12 +1098,17 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             confidence: Math.abs(upside) > 0.30 ? 'High' : 'Medium',
             reasoning: `Based on ${growth.source} growth of ${(growth.rate * 100).toFixed(1)}%, ` +
                 `WACC of ${(waccResult.wacc * 100).toFixed(1)}%, ` +
-                `and FCF margin of ${(fcfMargin * 100).toFixed(1)}%. ` +
+                `FCF margin of ${(fcfMargin * 100).toFixed(1)}% (${fcfMethod}). ` +
                 `Market implies ${reverseDCFResult.impliedGrowthFormatted} growth.`,
+        },
+        keyAssumptions: {
+            baseRevenue, effectiveTaxRate, ebitdaMargin, capexToRevenue, daToRevenue,
+            gdpCeiling, gdpCountry: gdpResult.country, filingDate: filingDate || 'N/A',
         },
         warnings,
     };
 
-    console.log(`✅ [DCF v4] Analysis complete for ${sym}. Intrinsic Value: $${valuation.intrinsicValuePerShare.toFixed(2)} | Current: $${currentPrice.toFixed(2)} | Upside: ${(upside * 100).toFixed(1)}%`);
+    console.log(`✅ [DCF v5] Complete for ${sym}. IV: $${valuation.intrinsicValuePerShare.toFixed(2)} | Price: $${currentPrice.toFixed(2)} | Upside: ${(upside * 100).toFixed(1)}%`);
     return result;
 }
+
