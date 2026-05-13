@@ -47,6 +47,224 @@ const SECTOR_DEFAULTS: Record<string, { beta: number; debtRatio: number; termina
 };
 
 // ─────────────────────────────────────────────────────────
+// F1: Financial Institutions Detection
+// ─────────────────────────────────────────────────────────
+
+export type FinancialInstitutionType = 'BANK' | 'INSURANCE' | 'REIT' | 'ASSET_MANAGER' | null;
+
+export function detectFinancialInstitution(
+    profile: { sector?: string; industry?: string },
+    incomeStatement?: { netInterestIncome?: number; interestExpense?: number; netPremium?: number }
+): { isFinancialInstitution: boolean; type: FinancialInstitutionType; reason: string } {
+    const sector = (profile.sector || '').toUpperCase();
+    const industry = (profile.industry || '').toUpperCase();
+
+    // Check sector first
+    if (sector === 'FINANCIALS') {
+        // Determine type from industry
+        if (industry.includes('BANK') || industry.includes('BANKS') || industry.includes('CREDIT')) {
+            return { isFinancialInstitution: true, type: 'BANK', reason: 'Commercial/Investment Bank' };
+        }
+        if (industry.includes('INSURANCE') || industry.includes('UNDERWRITING')) {
+            return { isFinancialInstitution: true, type: 'INSURANCE', reason: 'Insurance Company' };
+        }
+        if (industry.includes('ASSET') || industry.includes('MANAGEMENT') || industry.includes('INVESTMENT')) {
+            return { isFinancialInstitution: true, type: 'ASSET_MANAGER', reason: 'Asset Management Firm' };
+        }
+        // Default to BANK for financials without specific industry
+        return { isFinancialInstitution: true, type: 'BANK', reason: 'Financial Services (default)' };
+    }
+
+    if (sector === 'REAL ESTATE') {
+        if (industry.includes('REIT') || industry.includes('REAL ESTATE INVESTMENT')) {
+            return { isFinancialInstitution: true, type: 'REIT', reason: 'Real Estate Investment Trust' };
+        }
+    }
+
+    // Check income statement for financial indicators
+    if (incomeStatement) {
+        const hasInterestIncome = (incomeStatement.netInterestIncome ?? 0) !== 0;
+        const hasInterestExpense = (incomeStatement.interestExpense ?? 0) !== 0;
+        const hasNetPremium = (incomeStatement.netPremium ?? 0) !== 0;
+
+        // If primary revenue is from interest, likely a bank
+        if (hasInterestIncome && hasInterestExpense && !hasNetPremium) {
+            return { isFinancialInstitution: true, type: 'BANK', reason: 'Net interest income detected' };
+        }
+        // If has net premiums, likely insurance
+        if (hasNetPremium) {
+            return { isFinancialInstitution: true, type: 'INSURANCE', reason: 'Net premium revenue detected' };
+        }
+    }
+
+    return { isFinancialInstitution: false, type: null, reason: 'Non-financial company' };
+}
+
+// ─────────────────────────────────────────────────────────
+// F3: Dividend Discount Model (DDM) for Banks/Insurance
+// ─────────────────────────────────────────────────────────
+
+interface DDMResult {
+    intrinsicValue: number;
+    stage1PV: number;
+    terminalValue: number;
+    terminalPV: number;
+    dividendsProjected: { year: number; dividend: number; pv: number }[];
+    excessReturnValue?: number;
+}
+
+function calculateDDM(
+    latestEPS: number,
+    payoutRatio: number,
+    growthRate: number,
+    costOfEquity: number,
+    terminalGrowth: number,
+    sharesOutstanding: number,
+    bookValuePerShare?: number,
+    roe?: number,
+): DDMResult {
+    const projections: { year: number; dividend: number; pv: number }[] = [];
+    let eps = latestEPS;
+    let stage1PV = 0;
+
+    // Stage 1: 5 years of explicit dividends
+    for (let year = 1; year <= PHASE_1_YEARS; year++) {
+        eps = eps * (1 + growthRate);
+        const dividend = eps * payoutRatio;
+        const pv = dividend / Math.pow(1 + costOfEquity, year);
+        stage1PV += pv;
+        projections.push({ year, dividend, pv });
+    }
+
+    // Terminal value (Gordon Growth)
+    const finalDividend = projections[PHASE_1_YEARS - 1].dividend * (1 + terminalGrowth);
+    const terminalValue = finalDividend / (costOfEquity - terminalGrowth);
+    const terminalPV = terminalValue / Math.pow(1 + costOfEquity, PHASE_1_YEARS);
+
+    // Intrinsic value
+    const intrinsicValue = (stage1PV + terminalPV) / sharesOutstanding;
+
+    // Excess Return Value (if book value and ROE available)
+    let excessReturnValue: number | undefined;
+    if (bookValuePerShare && roe && payoutRatio < 1) {
+        let pvExcessReturns = 0;
+        let bv = bookValuePerShare;
+        for (let year = 1; year <= PHASE_1_YEARS; year++) {
+            const excessReturn = (roe - costOfEquity) * bv;
+            pvExcessReturns += excessReturn / Math.pow(1 + costOfEquity, year);
+            bv = bv * (1 + growthRate); // Retained earnings plowed back
+        }
+        excessReturnValue = (bookValuePerShare + pvExcessReturns) / sharesOutstanding;
+    }
+
+    return {
+        intrinsicValue,
+        stage1PV,
+        terminalValue,
+        terminalPV,
+        dividendsProjected: projections,
+        excessReturnValue,
+    };
+}
+
+// ─────────────────────────────────────────────────────────
+// F4: FFO Model for REITs
+// ─────────────────────────────────────────────────────────
+
+interface FFOResult {
+    intrinsicValue: number;
+    ffoProjected: { year: number; ffo: number; pv: number }[];
+    terminalValue: number;
+    terminalPV: number;
+}
+
+function calculateFFO(
+    netIncome: number,
+    depreciation: number,
+    gainsOnPropertySales: number,
+    growthRate: number,
+    costOfEquity: number,
+    terminalGrowth: number,
+    sharesOutstanding: number,
+): FFOResult {
+    const projections: { year: number; ffo: number; pv: number }[] = [];
+    let ffo = netIncome + depreciation - gainsOnPropertySales;
+    let stage1PV = 0;
+
+    // Project FFO for 5 years
+    for (let year = 1; year <= PHASE_1_YEARS; year++) {
+        ffo = ffo * (1 + growthRate);
+        const pv = ffo / Math.pow(1 + costOfEquity, year);
+        stage1PV += pv;
+        projections.push({ year, ffo, pv });
+    }
+
+    // Terminal value
+    const finalFFO = projections[PHASE_1_YEARS - 1].ffo * (1 + terminalGrowth);
+    const terminalValue = finalFFO / (costOfEquity - terminalGrowth);
+    const terminalPV = terminalValue / Math.pow(1 + costOfEquity, PHASE_1_YEARS);
+
+    const intrinsicValue = (stage1PV + terminalPV) / sharesOutstanding;
+
+    return {
+        intrinsicValue,
+        ffoProjected: projections,
+        terminalValue,
+        terminalPV,
+    };
+}
+
+// ─────────────────────────────────────────────────────────
+// F5: FCFE Model for Asset Managers
+// ─────────────────────────────────────────────────────────
+
+interface FCFEResult {
+    intrinsicValue: number;
+    fcfeProjected: { year: number; fcfe: number; pv: number }[];
+    terminalValue: number;
+    terminalPV: number;
+}
+
+function calculateFCFE(
+    netIncome: number,
+    capex: number,
+    depreciation: number,
+    workingCapitalChange: number,
+    debtRatio: number,
+    growthRate: number,
+    costOfEquity: number,
+    terminalGrowth: number,
+    sharesOutstanding: number,
+): FCFEResult {
+    const projections: { year: number; fcfe: number; pv: number }[] = [];
+    let fcfe = netIncome - (capex - depreciation) * (1 - debtRatio) - workingCapitalChange * (1 - debtRatio);
+    let stage1PV = 0;
+
+    // Project FCFE for 5 years
+    for (let year = 1; year <= PHASE_1_YEARS; year++) {
+        // Simplified: grow FCFE at same rate as earnings
+        fcfe = fcfe * (1 + growthRate);
+        const pv = fcfe / Math.pow(1 + costOfEquity, year);
+        stage1PV += pv;
+        projections.push({ year, fcfe, pv });
+    }
+
+    // Terminal value
+    const finalFCFE = projections[PHASE_1_YEARS - 1].fcfe * (1 + terminalGrowth);
+    const terminalValue = finalFCFE / (costOfEquity - terminalGrowth);
+    const terminalPV = terminalValue / Math.pow(1 + costOfEquity, PHASE_1_YEARS);
+
+    const intrinsicValue = (stage1PV + terminalPV) / sharesOutstanding;
+
+    return {
+        intrinsicValue,
+        fcfeProjected: projections,
+        terminalValue,
+        terminalPV,
+    };
+}
+
+// ─────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────
 
@@ -82,6 +300,7 @@ export interface DCFResult {
         dcfMethod: string;
         analysisDate: string;
         overridesApplied?: Partial<DCFOverrides>;
+        financialInstitution?: { type: FinancialInstitutionType; reason: string };
     };
     currentMarketData: {
         currentPrice: number;
@@ -165,6 +384,8 @@ export interface DCFResult {
         filingDate: string;
     };
     warnings: string[];
+    sensitivityAnalysis?: SensitivityResult;
+    footballField?: FootballFieldRange[];
 }
 
 export interface QuickDCFResult {
@@ -712,6 +933,147 @@ function calculateIntrinsicValue(
 }
 
 // ─────────────────────────────────────────────────────────
+// P4.1: Sensitivity Analysis
+// ─────────────────────────────────────────────────────────
+
+export interface SensitivityResult {
+    waccValues: number[];
+    tgValues: number[];
+    matrix: number[][];
+    baseWacc: number;
+    baseTg: number;
+    baseValue: number;
+}
+
+export function runSensitivityAnalysis(
+    baseParams: {
+        baseRevenue: number;
+        fcfMargin: number;
+        ebitdaMargin: number;
+        capexToRevenue: number;
+        daToRevenue: number;
+        effectiveTaxRate: number;
+        sharesOutstanding: number;
+        netDebt: number;
+        terminalGrowth: number;
+    },
+    baseWacc: number,
+    baseTg: number,
+): SensitivityResult {
+    const waccStep = 0.005; // 0.5%
+    const tgStep = 0.0025; // 0.25%
+
+    const waccValues: number[] = [];
+    const tgValues: number[] = [];
+
+    // WACC range: ±1% in 0.5% steps (5 values)
+    for (let w = baseWacc - 0.01; w <= baseWacc + 0.01; w += waccStep) {
+        waccValues.push(Math.max(0.03, Math.min(0.25, w)));
+    }
+
+    // Terminal growth: ±0.5% in 0.25% steps (5 values)
+    for (let t = baseTg - 0.005; t <= baseTg + 0.005; t += tgStep) {
+        tgValues.push(Math.max(0, Math.min(baseWacc - 0.01, t)));
+    }
+
+    // Build matrix
+    const matrix: number[][] = [];
+    for (const wacc of waccValues) {
+        const row: number[] = [];
+        for (const tg of tgValues) {
+            const projections = projectCashFlows(
+                baseParams.baseRevenue,
+                baseParams.fcfMargin * (1 + (wacc - baseWacc) * 0.5), // Crude growth adj
+                baseParams.fcfMargin,
+                baseParams.ebitdaMargin,
+                baseParams.capexToRevenue,
+                baseParams.daToRevenue,
+                baseParams.effectiveTaxRate,
+                PROJECTION_YEARS,
+                tg
+            );
+            const result = calculateIntrinsicValue(
+                projections,
+                wacc,
+                tg,
+                baseParams.sharesOutstanding,
+                baseParams.netDebt
+            );
+            row.push(result.intrinsicValuePerShare);
+        }
+        matrix.push(row);
+    }
+
+    // Find base value (center of matrix)
+    const centerRow = Math.floor(waccValues.length / 2);
+    const centerCol = Math.floor(tgValues.length / 2);
+    const baseValue = matrix[centerRow]?.[centerCol] ?? 0;
+
+    return { waccValues, tgValues, matrix, baseWacc, baseTg, baseValue };
+}
+
+// ─────────────────────────────────────────────────────────
+// P4.3: Football Field Chart Data
+// ─────────────────────────────────────────────────────────
+
+export interface FootballFieldRange {
+    label: string;
+    low: number;
+    high: number;
+    currentPrice?: number;
+}
+
+export function buildFootballField(
+    dcfResult: {
+        intrinsicValuePerShare: number;
+        enterpriseValue: number;
+        sumDiscountedFCF: number;
+    },
+    sensitivityResult: SensitivityResult | null,
+    exitMultipleValue: number,
+    currentPrice: number,
+    _sharesOutstanding?: number,
+): FootballFieldRange[] {
+    const ranges: FootballFieldRange[] = [];
+
+    // DCF Base
+    ranges.push({
+        label: 'DCF (Gordon Growth)',
+        low: dcfResult.intrinsicValuePerShare * 0.8,
+        high: dcfResult.intrinsicValuePerShare * 1.2,
+    });
+
+    // Sensitivity Analysis
+    if (sensitivityResult) {
+        const flatValues = sensitivityResult.matrix.flat();
+        ranges.push({
+            label: 'Sensitivity Range',
+            low: Math.min(...flatValues),
+            high: Math.max(...flatValues),
+        });
+    }
+
+    // Exit Multiple
+    if (exitMultipleValue > 0) {
+        ranges.push({
+            label: 'Exit Multiple',
+            low: exitMultipleValue * 0.8,
+            high: exitMultipleValue * 1.2,
+        });
+    }
+
+    // Market Price
+    ranges.push({
+        label: 'Current Price',
+        low: currentPrice,
+        high: currentPrice,
+        currentPrice: currentPrice,
+    });
+
+    return ranges;
+}
+
+// ─────────────────────────────────────────────────────────
 // Task 6: Reverse DCF (Implied Growth Rate)
 // ─────────────────────────────────────────────────────────
 
@@ -951,6 +1313,59 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const waccResult = calculateWACC(profile, latestBalance, latestIncome, {}, peerBetaResult);
     console.log(`📊 [DCF] WACC: ${(waccResult.wacc * 100).toFixed(2)}%${waccResult.clamped ? ' (clamped)' : ''}`);
 
+    // ─── F1: Check for Financial Institutions ─────────────
+    console.log(`📊 [DCF] Step 6b: Checking for financial institution...`);
+    const finCheck = detectFinancialInstitution(
+        { sector: profile.sector, industry: profile.industry },
+        { netInterestIncome: latestIncome.interestIncome, interestExpense: latestIncome.interestExpense }
+    );
+
+    let modelUsed = 'standard_dcf';
+    let altValuationResult: DDMResult | FFOResult | FCFEResult | null = null;
+    let finCostOfEquity = 0;
+    let finTerminalGrowthRate = terminalGrowthRate;
+
+    if (finCheck.isFinancialInstitution && finCheck.type) {
+        console.log(`🏦 [DCF] Financial institution detected: ${finCheck.type} - ${finCheck.reason}`);
+        modelUsed = `financial_${finCheck.type.toLowerCase()}`;
+
+        // Calculate cost of equity using CAPM (not WACC for financial institutions)
+        finCostOfEquity = RISK_FREE_RATE + peerBetaResult.leveredBeta * EQUITY_RISK_PREMIUM;
+        finTerminalGrowthRate = Math.min(TERMINAL_GROWTH_RATE, gdpCeiling);
+
+        switch (finCheck.type) {
+            case 'BANK':
+            case 'INSURANCE': {
+                const latestEPS = latestIncome.epsdiluted ?? (latestIncome.netIncome / sharesOutstanding);
+                const payoutRatio = 0.30;
+                const bookValuePerShare = latestBalance.totalStockholdersEquity ? latestBalance.totalStockholdersEquity / sharesOutstanding : undefined;
+                const roe = latestBalance.totalStockholdersEquity ? latestIncome.netIncome / latestBalance.totalStockholdersEquity : undefined;
+                const finGrowthRate = Math.min(growth.rate, 0.08);
+
+                altValuationResult = calculateDDM(latestEPS, payoutRatio, finGrowthRate, finCostOfEquity, finTerminalGrowthRate, sharesOutstanding, bookValuePerShare, roe);
+                console.log(`📊 [DCF] DDM: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
+                break;
+            }
+            case 'REIT': {
+                const netIncome = latestIncome.netIncome ?? 0;
+                const depreciation = latestCashFlow.depreciationAndAmortization ?? 0;
+                altValuationResult = calculateFFO(netIncome, depreciation, 0, Math.min(growth.rate, 0.06), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
+                console.log(`📊 [DCF] FFO: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
+                break;
+            }
+            case 'ASSET_MANAGER': {
+                const netIncome = latestIncome.netIncome ?? 0;
+                const capex = latestCashFlow.capitalExpenditure ?? 0;
+                const depreciation = latestCashFlow.depreciationAndAmortization ?? 0;
+                const wcChange = latestCashFlow.changeInWorkingCapital ?? 0;
+                const debtRatio = targetDE / (1 + targetDE);
+                altValuationResult = calculateFCFE(netIncome, capex, depreciation, wcChange, debtRatio, Math.min(growth.rate, 0.08), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
+                console.log(`📊 [DCF] FCFE: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
+                break;
+            }
+        }
+    }
+
     // ─── 8. Project 10 years ─────────────────────────
     console.log(`📊 [DCF] Step 7: Projecting cash flows...`);
     const projections = projectCashFlows(baseRevenue, growth.rate, fcfMargin, ebitdaMargin,
@@ -982,8 +1397,9 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const result: DCFResult = {
         metadata: {
             companyName: profile.companyName, ticker: sym,
-            sector: profile.sector || 'Unknown', dcfMethod: 'ebitda_based_fcff',
+            sector: profile.sector || 'Unknown', dcfMethod: modelUsed !== 'standard_dcf' ? modelUsed : 'ebitda_based_fcff',
             analysisDate: new Date().toISOString(),
+            financialInstitution: finCheck.isFinancialInstitution ? { type: finCheck.type, reason: finCheck.reason } : undefined,
         },
         currentMarketData: { currentPrice, marketCap: profile.mktCap || 0, sharesOutstanding },
         growthAnalysis: {
@@ -1019,18 +1435,32 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             cash: Math.round(cash), equityValue: Math.round(valuation.equityValue),
         },
         valuationSummary: {
-            intrinsicValue: Math.round(valuation.intrinsicValuePerShare * 100) / 100, currentPrice,
-            upsideDownside: (upside * 100).toFixed(2) + '%',
-            valuation: upside > 0.15 ? 'UNDERVALUED' : upside < -0.15 ? 'OVERVALUED' : 'FAIRLY_VALUED',
+            intrinsicValue: altValuationResult
+                ? Math.round((altValuationResult as any).intrinsicValue * 100) / 100
+                : Math.round(valuation.intrinsicValuePerShare * 100) / 100,
+            currentPrice,
+            upsideDownside: altValuationResult
+                ? (((altValuationResult as any).intrinsicValue - currentPrice) / currentPrice * 100).toFixed(2) + '%'
+                : (upside * 100).toFixed(2) + '%',
+            valuation: altValuationResult
+                ? ((altValuationResult as any).intrinsicValue > currentPrice * 1.15 ? 'UNDERVALUED' :
+                   (altValuationResult as any).intrinsicValue < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
+                : (upside > 0.15 ? 'UNDERVALUED' : upside < -0.15 ? 'OVERVALUED' : 'FAIRLY_VALUED'),
         },
         reverseDCF: reverseDCFResult,
         investmentRecommendation: {
-            recommendation: upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL',
-            confidence: Math.abs(upside) > 0.30 ? 'High' : 'Medium',
-            reasoning: `Based on ${growth.source} growth of ${(growth.rate * 100).toFixed(1)}%, ` +
-                `WACC of ${(waccResult.wacc * 100).toFixed(1)}%, ` +
-                `FCF margin of ${(fcfMargin * 100).toFixed(1)}% (${fcfMethod}). ` +
-                `Market implies ${reverseDCFResult.impliedGrowthFormatted} growth.`,
+            recommendation: (altValuationResult
+                ? (altValuationResult as any).intrinsicValue > currentPrice * 1.20 ? 'BUY' :
+                  (altValuationResult as any).intrinsicValue < currentPrice * 0.80 ? 'SELL' : 'HOLD'
+                : upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL'),
+            confidence: 'Medium',
+            reasoning: altValuationResult
+                ? `Financial institution valuation using ${modelUsed.replace('financial_', '').toUpperCase()} model. ` +
+                  `Cost of Equity: ${(finCostOfEquity * 100).toFixed(1)}%, Terminal Growth: ${(finTerminalGrowthRate * 100).toFixed(1)}%.`
+                : `Based on ${growth.source} growth of ${(growth.rate * 100).toFixed(1)}%, ` +
+                  `WACC of ${(waccResult.wacc * 100).toFixed(1)}%, ` +
+                  `FCF margin of ${(fcfMargin * 100).toFixed(1)}% (${fcfMethod}). ` +
+                  `Market implies ${reverseDCFResult.impliedGrowthFormatted} growth.`,
         },
         keyAssumptions: {
             baseRevenue, effectiveTaxRate, ebitdaMargin, capexToRevenue, daToRevenue,
