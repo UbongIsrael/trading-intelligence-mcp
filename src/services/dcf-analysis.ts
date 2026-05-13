@@ -1336,21 +1336,44 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         switch (finCheck.type) {
             case 'BANK':
             case 'INSURANCE': {
-                const latestEPS = latestIncome.epsdiluted ?? (latestIncome.netIncome / sharesOutstanding);
-                const payoutRatio = 0.30;
-                const bookValuePerShare = latestBalance.totalStockholdersEquity ? latestBalance.totalStockholdersEquity / sharesOutstanding : undefined;
-                const roe = latestBalance.totalStockholdersEquity ? latestIncome.netIncome / latestBalance.totalStockholdersEquity : undefined;
-                const finGrowthRate = Math.min(growth.rate, 0.08);
-
-                altValuationResult = calculateDDM(latestEPS, payoutRatio, finGrowthRate, finCostOfEquity, finTerminalGrowthRate, sharesOutstanding, bookValuePerShare, roe);
+                // Calculate EPS properly - use net income / shares if epsdiluted is missing/zero
+                let latestEPS = latestIncome.epsdiluted;
+                if (!latestEPS || latestEPS <= 0) {
+                    // Fallback: use diluted EPS from income statement net income
+                    latestEPS = latestIncome.netIncome / sharesOutstanding;
+                }
+                // If still invalid (e.g., 0 shares), use a reasonable EPS proxy
+                if (!latestEPS || latestEPS <= 0 || !isFinite(latestEPS)) {
+                    console.warn(`⚠️ [DCF] Cannot calculate DDM - invalid EPS (${latestEPS}). Falling back to book value method.`);
+                    // Use book value per share as minimum floor
+                    const bvPerShare = latestBalance.totalStockholdersEquity ? latestBalance.totalStockholdersEquity / sharesOutstanding : 0;
+                    altValuationResult = {
+                        intrinsicValue: bvPerShare, // Use book value as floor
+                        stage1PV: 0,
+                        terminalValue: 0,
+                        terminalPV: 0,
+                        dividendsProjected: [],
+                    };
+                } else {
+                    const payoutRatio = 0.30;
+                    const bookValuePerShare = latestBalance.totalStockholdersEquity ? latestBalance.totalStockholdersEquity / sharesOutstanding : undefined;
+                    const roe = latestBalance.totalStockholdersEquity ? latestIncome.netIncome / latestBalance.totalStockholdersEquity : undefined;
+                    const finGrowthRate = Math.min(growth.rate, 0.08);
+                    altValuationResult = calculateDDM(latestEPS, payoutRatio, finGrowthRate, finCostOfEquity, finTerminalGrowthRate, sharesOutstanding, bookValuePerShare, roe);
+                }
                 console.log(`📊 [DCF] DDM: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
                 break;
             }
             case 'REIT': {
                 const netIncome = latestIncome.netIncome ?? 0;
                 const depreciation = latestCashFlow.depreciationAndAmortization ?? 0;
-                altValuationResult = calculateFFO(netIncome, depreciation, 0, Math.min(growth.rate, 0.06), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
-                console.log(`📊 [DCF] FFO: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
+                if (netIncome <= 0 || sharesOutstanding <= 0) {
+                    console.warn(`⚠️ [DCF] Cannot calculate FFO - invalid data.`);
+                    altValuationResult = null;
+                } else {
+                    altValuationResult = calculateFFO(netIncome, depreciation, 0, Math.min(growth.rate, 0.06), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
+                }
+                console.log(`📊 [DCF] FFO: Intrinsic Value = $${altValuationResult?.intrinsicValue?.toFixed(2) ?? 'N/A'}`);
                 break;
             }
             case 'ASSET_MANAGER': {
@@ -1358,12 +1381,22 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 const capex = latestCashFlow.capitalExpenditure ?? 0;
                 const depreciation = latestCashFlow.depreciationAndAmortization ?? 0;
                 const wcChange = latestCashFlow.changeInWorkingCapital ?? 0;
-                const debtRatio = targetDE / (1 + targetDE);
-                altValuationResult = calculateFCFE(netIncome, capex, depreciation, wcChange, debtRatio, Math.min(growth.rate, 0.08), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
-                console.log(`📊 [DCF] FCFE: Intrinsic Value = $${altValuationResult.intrinsicValue.toFixed(2)}`);
+                if (netIncome <= 0 || sharesOutstanding <= 0) {
+                    console.warn(`⚠️ [DCF] Cannot calculate FCFE - invalid data.`);
+                    altValuationResult = null;
+                } else {
+                    const debtRatio = targetDE / (1 + targetDE);
+                    altValuationResult = calculateFCFE(netIncome, capex, depreciation, wcChange, debtRatio, Math.min(growth.rate, 0.08), finCostOfEquity, finTerminalGrowthRate, sharesOutstanding);
+                }
+                console.log(`📊 [DCF] FCFE: Intrinsic Value = $${altValuationResult?.intrinsicValue?.toFixed(2) ?? 'N/A'}`);
                 break;
             }
         }
+    }
+
+    // For financial institutions, SKIP standard DCF entirely - it gives garbage results
+    if (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue <= 0) {
+        console.warn(`⚠️ [DCF] Financial institution valuation failed - cannot compute ${finCheck.type} model.`);
     }
 
     // ─── 8. Project 10 years ─────────────────────────
@@ -1435,32 +1468,39 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             cash: Math.round(cash), equityValue: Math.round(valuation.equityValue),
         },
         valuationSummary: {
-            intrinsicValue: altValuationResult
-                ? Math.round((altValuationResult as any).intrinsicValue * 100) / 100
-                : Math.round(valuation.intrinsicValuePerShare * 100) / 100,
+            // For financial institutions, ONLY use the DDM/FFO/FCFE result - NEVER fall back to standard DCF
+            intrinsicValue: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+                ? Math.round(altValuationResult.intrinsicValue * 100) / 100
+                : (finCheck.isFinancialInstitution ? 0 : Math.round(valuation.intrinsicValuePerShare * 100) / 100),
             currentPrice,
-            upsideDownside: altValuationResult
-                ? (((altValuationResult as any).intrinsicValue - currentPrice) / currentPrice * 100).toFixed(2) + '%'
-                : (upside * 100).toFixed(2) + '%',
-            valuation: altValuationResult
-                ? ((altValuationResult as any).intrinsicValue > currentPrice * 1.15 ? 'UNDERVALUED' :
-                   (altValuationResult as any).intrinsicValue < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
-                : (upside > 0.15 ? 'UNDERVALUED' : upside < -0.15 ? 'OVERVALUED' : 'FAIRLY_VALUED'),
+            upsideDownside: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+                ? (((altValuationResult.intrinsicValue - currentPrice) / currentPrice * 100).toFixed(2) + '%')
+                : (finCheck.isFinancialInstitution ? 'N/A' : (upside * 100).toFixed(2) + '%'),
+            valuation: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+                ? (altValuationResult.intrinsicValue > currentPrice * 1.15 ? 'UNDERVALUED' :
+                   altValuationResult.intrinsicValue < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
+                : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' :
+                   (upside > 0.15 ? 'UNDERVALUED' : upside < -0.15 ? 'OVERVALUED' : 'FAIRLY_VALUED')),
         },
         reverseDCF: reverseDCFResult,
         investmentRecommendation: {
-            recommendation: (altValuationResult
-                ? (altValuationResult as any).intrinsicValue > currentPrice * 1.20 ? 'BUY' :
-                  (altValuationResult as any).intrinsicValue < currentPrice * 0.80 ? 'SELL' : 'HOLD'
-                : upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL'),
-            confidence: 'Medium',
-            reasoning: altValuationResult
+            recommendation: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+                ? (altValuationResult.intrinsicValue > currentPrice * 1.20 ? 'BUY' :
+                   altValuationResult.intrinsicValue < currentPrice * 0.80 ? 'SELL' : 'HOLD')
+                : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' : 
+                   (upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL')),
+            confidence: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0) ? 'Medium' : 'Low',
+            reasoning: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? `Financial institution valuation using ${modelUsed.replace('financial_', '').toUpperCase()} model. ` +
                   `Cost of Equity: ${(finCostOfEquity * 100).toFixed(1)}%, Terminal Growth: ${(finTerminalGrowthRate * 100).toFixed(1)}%.`
-                : `Based on ${growth.source} growth of ${(growth.rate * 100).toFixed(1)}%, ` +
-                  `WACC of ${(waccResult.wacc * 100).toFixed(1)}%, ` +
-                  `FCF margin of ${(fcfMargin * 100).toFixed(1)}% (${fcfMethod}). ` +
-                  `Market implies ${reverseDCFResult.impliedGrowthFormatted} growth.`,
+                : (finCheck.isFinancialInstitution 
+                    ? `Banking/Financial institutions are not valued using standard DCF methods. ` +
+                      `For banks, debt is a raw material (deposits fund loans), not capital — making FCFF/WACC unreliable. ` +
+                      `Use current market price: $${currentPrice.toFixed(2)} for reference.`
+                    : `Based on ${growth.source} growth of ${(growth.rate * 100).toFixed(1)}%, ` +
+                      `WACC of ${(waccResult.wacc * 100).toFixed(1)}%, ` +
+                      `FCF margin of ${(fcfMargin * 100).toFixed(1)}% (${fcfMethod}). ` +
+                      `Market implies ${reverseDCFResult.impliedGrowthFormatted} growth.`),
         },
         keyAssumptions: {
             baseRevenue, effectiveTaxRate, ebitdaMargin, capexToRevenue, daToRevenue,
