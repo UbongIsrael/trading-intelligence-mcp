@@ -119,7 +119,7 @@ function calculateDDM(
     growthRate: number,
     costOfEquity: number,
     terminalGrowth: number,
-    sharesOutstanding: number,
+    _sharesOutstanding: number,
     bookValuePerShare?: number,
     roe?: number,
 ): DDMResult {
@@ -141,8 +141,8 @@ function calculateDDM(
     const terminalValue = finalDividend / (costOfEquity - terminalGrowth);
     const terminalPV = terminalValue / Math.pow(1 + costOfEquity, PHASE_1_YEARS);
 
-    // Intrinsic value
-    const intrinsicValue = (stage1PV + terminalPV) / sharesOutstanding;
+    // Intrinsic value (already per-share - stage1PV and terminalPV are discounted dividends per share)
+    const intrinsicValue = stage1PV + terminalPV;
 
     // Excess Return Value (if book value and ROE available)
     let excessReturnValue: number | undefined;
@@ -154,7 +154,7 @@ function calculateDDM(
             pvExcessReturns += excessReturn / Math.pow(1 + costOfEquity, year);
             bv = bv * (1 + growthRate); // Retained earnings plowed back
         }
-        excessReturnValue = (bookValuePerShare + pvExcessReturns) / sharesOutstanding;
+        excessReturnValue = bookValuePerShare + pvExcessReturns;
     }
 
     return {
@@ -268,18 +268,6 @@ function calculateFCFE(
 // Types
 // ─────────────────────────────────────────────────────────
 
-/** User-overridable fields for the DCF model */
-export interface DCFOverrides {
-    terminalGrowthRate?: number;     // override GDP-validated ceiling
-    wacc?: number;                   // skip WACC calculation entirely
-    costOfEquity?: number;           // override CAPM cost of equity
-    costOfDebt?: number;             // override calculated cost of debt
-    growthRate?: number;             // override revenue growth selection
-    fcfMargin?: number;              // override normalized FCF margin
-    capexRatio?: number;             // override CapEx/Revenue ratio
-    gdpCeiling?: number;             // manually override GDP growth ceiling
-}
-
 export interface DCFProjection {
     year: number;
     revenue: number;
@@ -299,7 +287,6 @@ export interface DCFResult {
         sector: string;
         dcfMethod: string;
         analysisDate: string;
-        overridesApplied?: Partial<DCFOverrides>;
         financialInstitution?: { type: FinancialInstitutionType; reason: string };
     };
     currentMarketData: {
@@ -948,6 +935,7 @@ export interface SensitivityResult {
 export function runSensitivityAnalysis(
     baseParams: {
         baseRevenue: number;
+        baseGrowthRate: number;
         fcfMargin: number;
         ebitdaMargin: number;
         capexToRevenue: number;
@@ -983,7 +971,7 @@ export function runSensitivityAnalysis(
         for (const tg of tgValues) {
             const projections = projectCashFlows(
                 baseParams.baseRevenue,
-                baseParams.fcfMargin * (1 + (wacc - baseWacc) * 0.5), // Crude growth adj
+                baseParams.baseGrowthRate,
                 baseParams.fcfMargin,
                 baseParams.ebitdaMargin,
                 baseParams.capexToRevenue,
@@ -1170,10 +1158,10 @@ export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
         growthRate = 0.05;
     }
 
-    // Discount rate and terminal PE from sector defaults
+    // Discount rate from sector beta via CAPM, terminal PE from sector defaults
     const sector = (profile.sector || 'DEFAULT').toUpperCase();
     const defaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
-    const discountRate = 0.10;
+    const discountRate = RISK_FREE_RATE + defaults.beta * EQUITY_RISK_PREMIUM;
     const terminalPE = defaults.terminalPE;
 
     // Project 10 years of EPS
@@ -1355,7 +1343,17 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                         dividendsProjected: [],
                     };
                 } else {
-                    const payoutRatio = 0.30;
+                    const dividendsPaid = Math.abs(latestCashFlow.dividendsPaid ?? 0);
+                    let payoutRatio = 0.30;
+                    if (latestIncome.netIncome && latestIncome.netIncome > 0 && dividendsPaid > 0) {
+                        payoutRatio = Math.min(dividendsPaid / latestIncome.netIncome, 1.0);
+                    }
+                    if (payoutRatio <= 0 || payoutRatio > 1 || !isFinite(payoutRatio)) {
+                        payoutRatio = 0.30;
+                        console.log(`⚠️ [DCF] DDM payout ratio invalid - using default 30%`);
+                    } else {
+                        console.log(`📊 [DCF] DDM payout ratio: ${(payoutRatio * 100).toFixed(1)}% (dividends: $${dividendsPaid.toFixed(0)}M / NI: $${latestIncome.netIncome.toFixed(0)}M)`);
+                    }
                     const bookValuePerShare = latestBalance.totalStockholdersEquity ? latestBalance.totalStockholdersEquity / sharesOutstanding : undefined;
                     const roe = latestBalance.totalStockholdersEquity ? latestIncome.netIncome / latestBalance.totalStockholdersEquity : undefined;
                     const finGrowthRate = Math.min(growth.rate, 0.08);
@@ -1427,6 +1425,21 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     if (terminalGrowthRate > gdpCeiling) {
         warnings.push(`Terminal growth (${(terminalGrowthRate * 100).toFixed(1)}%) exceeds GDP ceiling (${(gdpCeiling * 100).toFixed(1)}%).`);
     }
+
+    // ─── 13. Sensitivity Analysis & Football Field ───────────────────────
+    const sensitivityResult = finCheck.isFinancialInstitution ? null : runSensitivityAnalysis(
+        { baseRevenue, baseGrowthRate: growth.rate, fcfMargin, ebitdaMargin, capexToRevenue, daToRevenue, effectiveTaxRate, sharesOutstanding, netDebt, terminalGrowth: terminalGrowthRate },
+        waccResult.wacc,
+        terminalGrowthRate
+    );
+
+    const footballField = finCheck.isFinancialInstitution ? null : buildFootballField(
+        { intrinsicValuePerShare: valuation.intrinsicValuePerShare, enterpriseValue: valuation.enterpriseValue, sumDiscountedFCF: valuation.sumDiscountedFCF },
+        sensitivityResult,
+        exitMultiple.discountedExitMultipleTV / sharesOutstanding,
+        currentPrice
+    );
+
     const result: DCFResult = {
         metadata: {
             companyName: profile.companyName, ticker: sym,
@@ -1507,6 +1520,8 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             gdpCeiling, gdpCountry: gdpResult.country, filingDate: filingDate || 'N/A',
         },
         warnings,
+        sensitivityAnalysis: sensitivityResult || undefined,
+        footballField: footballField || undefined,
     };
 
     console.log(`✅ [DCF v5] Complete for ${sym}. IV: $${valuation.intrinsicValuePerShare.toFixed(2)} | Price: $${currentPrice.toFixed(2)} | Upside: ${(upside * 100).toFixed(1)}%`);

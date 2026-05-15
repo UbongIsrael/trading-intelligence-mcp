@@ -40,8 +40,8 @@ function fmtNum(n: number | null | undefined, decimals = 2): string {
 
 function formatDCFOutput(result: DCFResult): string {
     const { metadata, currentMarketData, growthAnalysis, waccCalculation,
-        projections, terminalValue, valuationSummary,
-        reverseDCF, investmentRecommendation, warnings } = result;
+        projections, terminalValue, valuationSummary, reverseDCF, investmentRecommendation,
+        keyAssumptions, warnings, sensitivityAnalysis, footballField } = result;
 
     let output = '';
 
@@ -152,6 +152,58 @@ function formatDCFOutput(result: DCFResult): string {
         output += `${'─'.repeat(70)}\n`;
         for (const w of warnings) {
             output += `  • ${w}\n`;
+        }
+    }
+
+    // ── Key Assumptions ───────────────────
+    output += `\n${'─'.repeat(70)}\n`;
+    output += `  📋 KEY ASSUMPTIONS\n`;
+    output += `${'─'.repeat(70)}\n`;
+    output += `  Base Revenue:      ${fmtNum(keyAssumptions.baseRevenue)}\n`;
+    output += `  EBITDA Margin:    ${(keyAssumptions.ebitdaMargin * 100).toFixed(1)}%\n`;
+    output += `  CapEx/Revenue:    ${(keyAssumptions.capexToRevenue * 100).toFixed(1)}%\n`;
+    output += `  D&A/Revenue:      ${(keyAssumptions.daToRevenue * 100).toFixed(1)}%\n`;
+    output += `  Tax Rate:         ${(keyAssumptions.effectiveTaxRate * 100).toFixed(1)}%\n`;
+    output += `  GDP Ceiling:      ${(keyAssumptions.gdpCeiling * 100).toFixed(1)}%\n`;
+    output += `  GDP Country:      ${keyAssumptions.gdpCountry}\n`;
+
+    // ── Sensitivity Analysis ─────────────
+    if (sensitivityAnalysis) {
+        output += `\n${'─'.repeat(70)}\n`;
+        output += `  🎯 SENSITIVITY ANALYSIS (WACC vs Terminal Growth)\n`;
+        output += `${'─'.repeat(70)}\n`;
+        output += `  Base WACC: ${(sensitivityAnalysis.baseWacc * 100).toFixed(1)}%  |  Base TG: ${(sensitivityAnalysis.baseTg * 100).toFixed(1)}%\n`;
+        output += `  Base Value: ${fmtNum(sensitivityAnalysis.baseValue)}\n\n`;
+        
+        // Header row with terminal growth rates
+        output += `          `;
+        for (const tg of sensitivityAnalysis.tgValues) {
+            output += `${(tg * 100).toFixed(1)}%`.padStart(10);
+        }
+        output += `\n`;
+        
+        // Data rows with WACC values
+        for (let i = 0; i < sensitivityAnalysis.waccValues.length; i++) {
+            output += `${(sensitivityAnalysis.waccValues[i] * 100).toFixed(1)}%`.padStart(10);
+            for (let j = 0; j < sensitivityAnalysis.tgValues.length; j++) {
+                const val = sensitivityAnalysis.matrix[i]?.[j];
+                output += fmtNum(val).padStart(10);
+            }
+            output += `\n`;
+        }
+    }
+
+    // ── Football Field ───────────────────
+    if (footballField && footballField.length > 0) {
+        output += `\n${'─'.repeat(70)}\n`;
+        output += `  🏈 FOOTBALL FIELD VALUATION RANGES\n`;
+        output += `${'─'.repeat(70)}\n`;
+        for (const range of footballField) {
+            output += `  ${range.label.padEnd(20)}  ${fmtNum(range.low).padStart(12)} - ${fmtNum(range.high).padStart(12)}`;
+            if (range.currentPrice !== undefined) {
+                output += `  [CURRENT]`;
+            }
+            output += `\n`;
         }
     }
 
