@@ -147,10 +147,7 @@ function calculateDDM(
     const terminalValue = finalDividend / (costOfEquity - terminalGrowth);
     const terminalPV = terminalValue / Math.pow(1 + costOfEquity, PHASE_1_YEARS);
 
-    // Intrinsic value (already per-share - stage1PV and terminalPV are discounted dividends per share)
-    const intrinsicValue = stage1PV + terminalPV;
-
-    // Excess Return Value (if book value and ROE available)
+    // Excess Return Value (if book value and ROE available) - compute first for blending
     let excessReturnValue: number | undefined;
     if (bookValuePerShare && roe && payoutRatio < 1) {
         let pvExcessReturns = 0;
@@ -161,6 +158,12 @@ function calculateDDM(
             bv = bv * (1 + growthRate); // Retained earnings plowed back
         }
         excessReturnValue = bookValuePerShare + pvExcessReturns;
+    }
+
+    // Intrinsic value - blend with excessReturnValue when available (50/50)
+    let intrinsicValue = stage1PV + terminalPV;
+    if (excessReturnValue !== undefined) {
+        intrinsicValue = (intrinsicValue + excessReturnValue) / 2;
     }
 
     return {
@@ -243,7 +246,8 @@ function calculateFCFE(
     sharesOutstanding: number,
 ): FCFEResult {
     const projections: { year: number; fcfe: number; pv: number }[] = [];
-    let fcfe = netIncome - (capex - depreciation) * (1 - debtRatio) - workingCapitalChange * (1 - debtRatio);
+    // FMP's changeInWorkingCapital is already the cash flow impact (negative = WC increased, cash used)
+    let fcfe = netIncome - (capex - depreciation) * (1 - debtRatio) + workingCapitalChange * (1 - debtRatio);
     let stage1PV = 0;
 
     // Project FCFE for 5 years
@@ -612,7 +616,7 @@ function mapSegmentToCountry(segment: string): string {
 function selectGrowthRate(
     incomeStatements: FMPIncomeStatement[],
     analystEstimates: { estimatedRevenueAvg?: number; estimatedEpsAvg?: number }[],
-): { rate: number; source: string; raw: number | null } {
+): { rate: number; source: string; raw: number | null; warning?: string } {
     // Sort income statements by date descending (most recent first)
     const sorted = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
 
@@ -622,9 +626,10 @@ function selectGrowthRate(
         const latestRevenue = sorted[0]?.revenue;
         if (fwdRevenue && fwdRevenue > 0 && latestRevenue && latestRevenue > 0) {
             const impliedGrowth = (fwdRevenue / latestRevenue) - 1;
-            if (isFinite(impliedGrowth) && impliedGrowth > 0) {
-                const clamped = Math.max(0.02, Math.min(impliedGrowth, 0.35));
-                return { rate: clamped, source: 'analyst_forward_revenue', raw: impliedGrowth };
+            if (isFinite(impliedGrowth)) {
+                const clamped = Math.max(-0.10, Math.min(impliedGrowth, 0.35));
+                const warning = impliedGrowth < 0 ? `Analyst expects revenue contraction (${(impliedGrowth * 100).toFixed(1)}%), clamped to -10%` : undefined;
+                return { rate: clamped, source: 'analyst_forward_revenue', raw: impliedGrowth, warning };
             }
         }
     }
@@ -640,8 +645,9 @@ function selectGrowthRate(
     }
 
     if (revenueCAGR !== null && isFinite(revenueCAGR)) {
-        const clamped = Math.max(0.02, Math.min(revenueCAGR, 0.35));
-        return { rate: clamped, source: 'revenue_cagr', raw: revenueCAGR };
+        const clamped = Math.max(-0.10, Math.min(revenueCAGR, 0.35));
+        const warning = revenueCAGR < 0 ? `Historical revenue contracting (${(revenueCAGR * 100).toFixed(1)}%), clamped to -10%` : undefined;
+        return { rate: clamped, source: 'revenue_cagr', raw: revenueCAGR, warning };
     }
 
     // Method 3: Sector default
@@ -656,7 +662,7 @@ function calculateNormalizedFCFMargin(
     incomeStatements: FMPIncomeStatement[],
     cashFlowStatements: FMPCashFlowStatement[],
     balanceSheets: FMPBalanceSheet[],
-): { margin: number; method: 'ebitda_based' | 'ocf_fallback' } {
+): { margin: number; method: 'ebitda_based' | 'ocf_fallback' | 'mixed' } {
     const margins: number[] = [];
 
     // Sort by date descending, take last 3 years
@@ -664,7 +670,8 @@ function calculateNormalizedFCFMargin(
     const cfSorted = [...cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
     const bsSorted = [...balanceSheets].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4); // need N+1 for WC delta
 
-    let method: 'ebitda_based' | 'ocf_fallback' = 'ebitda_based';
+    let ebitdaCount = 0;
+    let ocfCount = 0;
 
     for (let i = 0; i < incSorted.length; i++) {
         const inc = incSorted[i];
@@ -676,6 +683,7 @@ function calculateNormalizedFCFMargin(
 
         // Try EBITDA-based FCFF first
         if (inc.ebitda > 0 && inc.incomeBeforeTax !== 0 && bsCurrent && bsPrior) {
+            ebitdaCount++;
             const taxRate = inc.incomeBeforeTax > 0
                 ? Math.max(0, Math.min(inc.incomeTaxExpense / inc.incomeBeforeTax, 0.40))
                 : TAX_RATE;
@@ -689,7 +697,7 @@ function calculateNormalizedFCFMargin(
             margins.push(fcff / inc.revenue);
         } else {
             // Fallback: OCF - CapEx
-            method = 'ocf_fallback';
+            ocfCount++;
             const ocf = cf.operatingCashFlow || 0;
             const capex = cf.capitalExpenditure || 0;
             if (ocf > 0) {
@@ -701,6 +709,7 @@ function calculateNormalizedFCFMargin(
     if (margins.length === 0) return { margin: 0.10, method: 'ocf_fallback' };
 
     const avgMargin = margins.reduce((a, b) => a + b, 0) / margins.length;
+    const method = ocfCount === 0 ? 'ebitda_based' : ebitdaCount === 0 ? 'ocf_fallback' : 'mixed';
     return { margin: Math.max(0.05, Math.min(avgMargin, 0.50)), method };
 }
 
@@ -798,9 +807,10 @@ function calculateWACC(
     const debtWeight = totalCapital > 0 ? totalDebt / totalCapital : defaults.debtRatio;
     const preferredWeight = totalCapital > 0 ? preferredStock / totalCapital : 0;
 
-    // Cost of debt (or override)
+    // Cost of debt (or override) - clamp to realistic range [2%, 15%]
     const interestExpense = Math.abs(latestIncome.interestExpense || 0);
-    const costOfDebt = overrides?.costOfDebt ?? (totalDebt > 0 ? interestExpense / totalDebt : 0.05);
+    const rawCostOfDebt = totalDebt > 0 ? interestExpense / totalDebt : 0.05;
+    const costOfDebt = overrides?.costOfDebt ?? Math.max(0.02, Math.min(rawCostOfDebt, 0.15));
 
     // Preferred stock dividend rate (industry average fallback)
     const preferredDividendRate = 0.06;
@@ -954,20 +964,19 @@ export function runSensitivityAnalysis(
     baseWacc: number,
     baseTg: number,
 ): SensitivityResult {
-    const waccStep = 0.005; // 0.5%
-    const tgStep = 0.0025; // 0.25%
-
     const waccValues: number[] = [];
     const tgValues: number[] = [];
 
-    // WACC range: ±1% in 0.5% steps (5 values)
-    for (let w = baseWacc - 0.01; w <= baseWacc + 0.01; w += waccStep) {
-        waccValues.push(Math.max(0.03, Math.min(0.25, w)));
+    // WACC range: ±1% in 0.5% steps (5 values) - use explicit array to avoid floating-point drift
+    const waccDeltas = [-0.01, -0.005, 0, 0.005, 0.01];
+    for (const d of waccDeltas) {
+        waccValues.push(Math.max(0.03, Math.min(0.25, baseWacc + d)));
     }
 
     // Terminal growth: ±0.5% in 0.25% steps (5 values)
-    for (let t = baseTg - 0.005; t <= baseTg + 0.005; t += tgStep) {
-        tgValues.push(Math.max(0, Math.min(baseWacc - 0.01, t)));
+    const tgDeltas = [-0.005, -0.0025, 0, 0.0025, 0.005];
+    for (const d of tgDeltas) {
+        tgValues.push(Math.max(0, Math.min(baseWacc - 0.01, baseTg + d)));
     }
 
     // Build matrix
@@ -1256,17 +1265,18 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     if (baseRevenue <= 0) {
         throw new APIError(`Cannot run DCF for ${sym}: latest revenue is zero or negative.`, { symbol: sym, baseRevenue });
     }
-    if (sharesOutstanding <= 0) {
-        throw new APIError(`Cannot run DCF for ${sym}: shares outstanding is zero or missing.`, { symbol: sym });
+    if (!sharesOutstanding || sharesOutstanding <= 0 || !isFinite(sharesOutstanding)) {
+        throw new APIError(`Cannot run DCF for ${sym}: shares outstanding is invalid.`, { symbol: sym, sharesOutstanding });
     }
 
     // ─── 3. Derived ratios ───────────────────────────
     const effectiveTaxRate = latestIncome.incomeBeforeTax > 0
         ? Math.max(0, Math.min(latestIncome.incomeTaxExpense / latestIncome.incomeBeforeTax, 0.40))
         : TAX_RATE;
-    const ebitdaMargin = baseRevenue > 0 ? (latestIncome.ebitda / baseRevenue) : 0.20;
-    const capexToRevenue = latestCashFlow.capitalExpenditure > 0
-        ? latestCashFlow.capitalExpenditure / baseRevenue : 0.05;
+    const rawEbitdaMargin = baseRevenue > 0 ? (latestIncome.ebitda / baseRevenue) : 0.20;
+    const ebitdaMargin = Math.max(0.05, Math.min(rawEbitdaMargin, 0.80));
+    const rawCapex = latestCashFlow.capitalExpenditure ?? 0;
+    const capexToRevenue = rawCapex !== 0 ? Math.abs(rawCapex) / baseRevenue : 0.05;
     const daToRevenue = latestCashFlow.depreciationAndAmortization > 0
         ? latestCashFlow.depreciationAndAmortization / baseRevenue : 0.03;
     const netDebt = latestBalance.netDebt || 0;
