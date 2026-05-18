@@ -633,7 +633,7 @@ function selectGrowthRate(
         const latestIncomeDate = sorted[0]?.date;
         const futureEstimates = analystEstimates
             .filter(e => e.date && latestIncomeDate && e.date > latestIncomeDate)
-            .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+            .sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
 
         if (futureEstimates.length > 0) {
             const fwdRevenue = futureEstimates[0]?.estimatedRevenueAvg;
@@ -1340,13 +1340,14 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     );
     console.log(`📊 [DCF] Beta: ${peerBetaResult.leveredBeta.toFixed(3)} (${peerBetaResult.method}, ${peerBetaResult.peersUsed.length} peers)`);
 
-    // Peer beta sanity guard: if peer beta diverges >40% from profile beta, fall back to profile beta
+    // Peer beta sanity guard: if peer beta diverges >0.40 absolute units from profile beta, fall back to profile beta
     const MAX_PEER_BETA_DIVERGENCE = 0.40;
     const profileBeta = profile.beta ?? sectorDefaults.beta;
     const divergence = Math.abs(peerBetaResult.leveredBeta - profileBeta);
     if (divergence > MAX_PEER_BETA_DIVERGENCE) {
         console.log(`⚠️ [DCF] Peer beta (${peerBetaResult.leveredBeta.toFixed(2)}) diverges ${(divergence * 100).toFixed(0)}% from profile beta (${profileBeta.toFixed(2)}) — using profile beta`);
         peerBetaResult.leveredBeta = profileBeta;
+        peerBetaResult.unleveredBeta = profileBeta; // Sync for consistency
         peerBetaResult.method = 'profile_fallback';
     }
 
@@ -1472,6 +1473,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     // ─── 12. Warnings & output ───────────────────────
     const upside = (valuation.intrinsicValuePerShare - currentPrice) / currentPrice;
     const warnings = generateWarnings(growth, waccResult, valuation, fcfMargin);
+    if (growth.warning) warnings.push(growth.warning);
     // Note: GDP ceiling enforcement for user overrides happens in step 4 above (throws).
     // This warning catches auto-calculated edge cases (should be rare due to Math.min clamp).
     if (terminalGrowthRate > gdpCeiling) {
