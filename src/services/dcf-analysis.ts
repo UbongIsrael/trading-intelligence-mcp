@@ -622,21 +622,29 @@ function mapSegmentToCountry(segment: string): string {
  */
 function selectGrowthRate(
     incomeStatements: FMPIncomeStatement[],
-    analystEstimates: { estimatedRevenueAvg?: number; estimatedEpsAvg?: number }[],
+    analystEstimates: { date?: string; estimatedRevenueAvg?: number; estimatedEpsAvg?: number }[],
 ): { rate: number; source: string; raw: number | null; warning?: string } {
     // Sort income statements by date descending (most recent first)
     const sorted = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
 
     // Method 1: Analyst forward revenue growth
+    // Filter to only future-period estimates (date > latest income statement date)
     if (analystEstimates.length > 0 && sorted.length > 0) {
-        const fwdRevenue = analystEstimates[0]?.estimatedRevenueAvg;
-        const latestRevenue = sorted[0]?.revenue;
-        if (fwdRevenue && fwdRevenue > 0 && latestRevenue && latestRevenue > 0) {
-            const impliedGrowth = (fwdRevenue / latestRevenue) - 1;
-            if (isFinite(impliedGrowth)) {
-                const clamped = Math.max(-0.10, Math.min(impliedGrowth, 0.35));
-                const warning = impliedGrowth < 0 ? `Analyst expects revenue contraction (${(impliedGrowth * 100).toFixed(1)}%), clamped to -10%` : undefined;
-                return { rate: clamped, source: 'analyst_forward_revenue', raw: impliedGrowth, warning };
+        const latestIncomeDate = sorted[0]?.date;
+        const futureEstimates = analystEstimates
+            .filter(e => e.date && latestIncomeDate && e.date > latestIncomeDate)
+            .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+
+        if (futureEstimates.length > 0) {
+            const fwdRevenue = futureEstimates[0]?.estimatedRevenueAvg;
+            const latestRevenue = sorted[0]?.revenue;
+            if (fwdRevenue && fwdRevenue > 0 && latestRevenue && latestRevenue > 0) {
+                const impliedGrowth = (fwdRevenue / latestRevenue) - 1;
+                if (isFinite(impliedGrowth)) {
+                    const clamped = Math.max(-0.10, Math.min(impliedGrowth, 0.35));
+                    const warning = impliedGrowth < 0 ? `Analyst expects revenue contraction (${(impliedGrowth * 100).toFixed(1)}%), clamped to -10%` : undefined;
+                    return { rate: clamped, source: 'analyst_forward_revenue', raw: impliedGrowth, warning };
+                }
             }
         }
     }
@@ -791,8 +799,10 @@ function calculateWACC(
     peerBetaResult?: { leveredBeta: number; method: string },
 ): {
     wacc: number;
+    rawWacc: number;
     components: { costOfEquity: number; costOfDebt: number; equityWeight: number; debtWeight: number; beta: number; riskFreeRate: number; preferredStockWeight?: number };
     clamped: boolean;
+    clampDirection?: 'floor' | 'ceiling';
     sector: string;
 } {
     const sector = (profile.sector || 'DEFAULT').toUpperCase();
@@ -830,15 +840,18 @@ function calculateWACC(
 
     // Sanity clamp: WACC between 6% and 15%
     const clampedWACC = Math.max(0.06, Math.min(wacc, 0.15));
+    const clampDirection = wacc < 0.06 ? 'floor' : wacc > 0.15 ? 'ceiling' : undefined;
 
     return {
         wacc: clampedWACC,
+        rawWacc: wacc,
         components: {
             costOfEquity, costOfDebt, equityWeight, debtWeight, beta,
             riskFreeRate: RISK_FREE_RATE,
             ...(preferredWeight > 0 ? { preferredStockWeight: preferredWeight } : {}),
         },
         clamped: wacc !== clampedWACC,
+        clampDirection,
         sector,
     };
 }
@@ -1223,13 +1236,19 @@ export async function quickDCF(symbol: string): Promise<QuickDCFResult> {
 
 function generateWarnings(
     growth: { rate: number; source: string; raw: number | null },
-    waccResult: { wacc: number; clamped: boolean },
+    waccResult: { wacc: number; rawWacc: number; clamped: boolean; clampDirection?: 'floor' | 'ceiling' },
     valuation: { terminalValuePct: number },
     fcfMargin: number,
 ): string[] {
     const warnings: string[] = [];
     if (growth.rate >= 0.30) warnings.push('Growth rate at or near ceiling (35%). High uncertainty.');
-    if (waccResult.clamped) warnings.push('WACC was clamped to bounds. Check beta/debt data.');
+    if (waccResult.clamped) {
+        if (waccResult.clampDirection === 'floor') {
+            warnings.push(`WACC clamped to floor (6%). Raw WACC was ${(waccResult.rawWacc * 100).toFixed(1)}% — valuation likely overstated. Verify beta/peer data.`);
+        } else {
+            warnings.push(`WACC clamped to ceiling (15%). Raw WACC was ${(waccResult.rawWacc * 100).toFixed(1)}% — valuation likely understated. High-risk inputs detected.`);
+        }
+    }
     if (valuation.terminalValuePct > 0.80) warnings.push('Terminal value exceeds 80% of total — sensitive to terminal assumptions.');
     if (fcfMargin < 0.08) warnings.push('Low FCF margin. Company may be in heavy investment phase.');
     return warnings;
@@ -1320,6 +1339,16 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         profile.beta ?? sectorDefaults.beta
     );
     console.log(`📊 [DCF] Beta: ${peerBetaResult.leveredBeta.toFixed(3)} (${peerBetaResult.method}, ${peerBetaResult.peersUsed.length} peers)`);
+
+    // Peer beta sanity guard: if peer beta diverges >40% from profile beta, fall back to profile beta
+    const MAX_PEER_BETA_DIVERGENCE = 0.40;
+    const profileBeta = profile.beta ?? sectorDefaults.beta;
+    const divergence = Math.abs(peerBetaResult.leveredBeta - profileBeta);
+    if (divergence > MAX_PEER_BETA_DIVERGENCE) {
+        console.log(`⚠️ [DCF] Peer beta (${peerBetaResult.leveredBeta.toFixed(2)}) diverges ${(divergence * 100).toFixed(0)}% from profile beta (${profileBeta.toFixed(2)}) — using profile beta`);
+        peerBetaResult.leveredBeta = profileBeta;
+        peerBetaResult.method = 'profile_fallback';
+    }
 
     const waccResult = calculateWACC(profile, latestBalance, latestIncome, {}, peerBetaResult);
     console.log(`📊 [DCF] WACC: ${(waccResult.wacc * 100).toFixed(2)}%${waccResult.clamped ? ' (clamped)' : ''}`);
@@ -1463,6 +1492,13 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         currentPrice
     );
 
+    // Derive confidence based on data quality signals
+    const hasClampedWACC = waccResult.clamped;
+    const hasAnalystGrowth = growth.source === 'analyst_forward_revenue';
+    const derivedConfidence = !hasClampedWACC && hasAnalystGrowth ? 'High'
+                            : hasClampedWACC ? 'Low'
+                            : 'Medium';
+
     const result: DCFResult = {
         metadata: {
             companyName: profile.companyName, ticker: sym,
@@ -1520,12 +1556,12 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
         reverseDCF: reverseDCFResult,
         investmentRecommendation: {
+            confidence: derivedConfidence,
             recommendation: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? (altValuationResult.intrinsicValue > currentPrice * 1.20 ? 'BUY' :
                    altValuationResult.intrinsicValue < currentPrice * 0.80 ? 'SELL' : 'HOLD')
-                : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' : 
+                : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' :
                    (upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL')),
-            confidence: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0) ? 'Medium' : 'Low',
             reasoning: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? `Financial institution valuation using ${modelUsed.replace('financial_', '').toUpperCase()} model. ` +
                   `Cost of Equity: ${(finCostOfEquity * 100).toFixed(1)}%, Terminal Growth: ${(finTerminalGrowthRate * 100).toFixed(1)}%.`
