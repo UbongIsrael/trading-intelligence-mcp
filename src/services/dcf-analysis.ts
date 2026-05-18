@@ -1337,8 +1337,8 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     let finTerminalGrowthRate = terminalGrowthRate;
 
     if (finCheck.isFinancialInstitution && finCheck.type) {
-        console.log(`🏦 [DCF] Financial institution detected: ${finCheck.type} - ${finCheck.reason}`);
         modelUsed = `financial_${finCheck.type.toLowerCase()}`;
+        console.log(`🏦 [DCF] Financial institution detected: ${finCheck.type} - ${finCheck.reason} (using ${modelUsed})`);
 
         // Calculate cost of equity using CAPM (not WACC for financial institutions)
         finCostOfEquity = RISK_FREE_RATE + peerBetaResult.leveredBeta * EQUITY_RISK_PREMIUM;
