@@ -117,6 +117,7 @@ interface DDMResult {
     terminalPV: number;
     dividendsProjected: { year: number; dividend: number; pv: number }[];
     excessReturnValue?: number;
+    divergenceWarning?: string;
 }
 
 function calculateDDM(
@@ -160,11 +161,16 @@ function calculateDDM(
         excessReturnValue = bookValuePerShare + pvExcessReturns;
     }
 
-    // Intrinsic value - blend with excessReturnValue when available (50/50)
-    let intrinsicValue = stage1PV + terminalPV;
-    if (excessReturnValue !== undefined) {
-        intrinsicValue = (intrinsicValue + excessReturnValue) / 2;
-    }
+    // Intrinsic value from DDM (dividend stream) — primary valuation for banks/insurance
+    const intrinsicValue = stage1PV + terminalPV;
+
+    // Divergence warning: if excessReturnValue differs significantly from DDM value,
+    // it signals either suppressed dividends (DDM understates) or unsustainably high ROE
+    const divergenceWarning = excessReturnValue !== undefined
+        ? Math.abs(excessReturnValue - intrinsicValue) / intrinsicValue > 0.30
+            ? `DDM value ($${intrinsicValue.toFixed(2)}) differs significantly from Excess Return model ($${excessReturnValue.toFixed(2)}) — ${((excessReturnValue / intrinsicValue - 1) * 100).toFixed(0)}% deviation`
+            : undefined
+        : undefined;
 
     return {
         intrinsicValue,
@@ -173,6 +179,7 @@ function calculateDDM(
         terminalPV,
         dividendsProjected: projections,
         excessReturnValue,
+        divergenceWarning,
     };
 }
 
