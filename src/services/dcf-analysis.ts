@@ -54,7 +54,7 @@ export type FinancialInstitutionType = 'BANK' | 'INSURANCE' | 'REIT' | 'ASSET_MA
 
 export function detectFinancialInstitution(
     profile: { sector?: string; industry?: string },
-    incomeStatement?: { netInterestIncome?: number; interestExpense?: number; netPremium?: number }
+    incomeStatement?: { netInterestIncome?: number; interestExpense?: number; netPremium?: number; revenue?: number }
 ): { isFinancialInstitution: boolean; type: FinancialInstitutionType; reason: string } {
     const sector = (profile.sector || '').toUpperCase();
     const industry = (profile.industry || '').toUpperCase();
@@ -82,16 +82,22 @@ export function detectFinancialInstitution(
     }
 
     // Check income statement for financial indicators
+    // FMP's netInterestIncome can appear for any company with interest income/expense,
+    // so we need a proportionality threshold to distinguish banks (where it's primary revenue)
+    // from companies with minor interest income (e.g., NVDA: ~1% of revenue vs JPM: ~34%)
     if (incomeStatement) {
-        const hasInterestIncome = (incomeStatement.netInterestIncome ?? 0) !== 0;
-        const hasInterestExpense = (incomeStatement.interestExpense ?? 0) !== 0;
+        const netInterestIncome = incomeStatement.netInterestIncome ?? 0;
+        const revenue = incomeStatement.revenue ?? 0;
         const hasNetPremium = (incomeStatement.netPremium ?? 0) !== 0;
 
-        // If primary revenue is from interest, likely a bank
-        if (hasInterestIncome && hasInterestExpense && !hasNetPremium) {
-            return { isFinancialInstitution: true, type: 'BANK', reason: 'Net interest income detected' };
+        // Only flag as bank if netInterestIncome is a significant portion of revenue (>5%)
+        // Banks typically have 20-40% netInterestIncome ratio; non-banks are <2%
+        const interestIncomeRatio = revenue > 0 ? netInterestIncome / revenue : 0;
+        const isBankRevenue = interestIncomeRatio > 0.05;
+
+        if (isBankRevenue) {
+            return { isFinancialInstitution: true, type: 'BANK', reason: `Net interest income is ${(interestIncomeRatio * 100).toFixed(1)}% of revenue` };
         }
-        // If has net premiums, likely insurance
         if (hasNetPremium) {
             return { isFinancialInstitution: true, type: 'INSURANCE', reason: 'Net premium revenue detected' };
         }
@@ -1305,7 +1311,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`📊 [DCF] Step 6b: Checking for financial institution...`);
     const finCheck = detectFinancialInstitution(
         { sector: profile.sector, industry: profile.industry },
-        { netInterestIncome: latestIncome.interestIncome, interestExpense: latestIncome.interestExpense }
+        { netInterestIncome: latestIncome.netInterestIncome, interestExpense: latestIncome.interestExpense, netPremium: latestIncome.netPremium, revenue: latestIncome.revenue }
     );
 
     let modelUsed = 'standard_dcf';

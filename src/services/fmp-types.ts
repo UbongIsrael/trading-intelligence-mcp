@@ -37,6 +37,8 @@ export interface FMPIncomeStatement {
     costAndExpenses: number;
     interestIncome: number;
     interestExpense: number;
+    netInterestIncome?: number;       // Bank-specific: interest earned - interest paid (only populated for banks)
+    netPremium?: number;              // Insurance-specific: premiums earned - premiums ceded (only populated for insurers)
     depreciationAndAmortization: number;
     ebitda: number;
     ebitdaratio: number;
