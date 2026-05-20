@@ -439,12 +439,13 @@ export function computeFCFF(
     da: number,
     capex: number,
     deltaWorkingCapital: number,
-): { fcff: number; components: { ebitdaAfterTax: number; daAddback: number; capexDeduction: number; wcDeduction: number } } {
+): { fcff: number; components: { ebitdaAfterTax: number; daTaxShield: number; capexDeduction: number; wcDeduction: number } } {
     const ebitdaAfterTax = ebitda * (1 - taxRate);
-    const fcff = ebitdaAfterTax + da - capex - deltaWorkingCapital;
+    const daTaxShield = da * taxRate;
+    const fcff = ebitdaAfterTax + daTaxShield - capex - deltaWorkingCapital;
     return {
         fcff,
-        components: { ebitdaAfterTax, daAddback: da, capexDeduction: capex, wcDeduction: deltaWorkingCapital },
+        components: { ebitdaAfterTax, daTaxShield, capexDeduction: capex, wcDeduction: deltaWorkingCapital },
     };
 }
 
