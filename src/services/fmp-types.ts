@@ -174,6 +174,7 @@ export interface FMPProfile {
     beta: number;
     volAvg: number;
     mktCap: number;
+    marketCap: number; // FMP API returns this camelCase field
     lastDiv: number;
     range: string;
     changes: number;

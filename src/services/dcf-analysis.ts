@@ -564,7 +564,7 @@ export async function calculatePeerBeta(
             if (!peerBeta) return;
             
             const totalDebt = bs[0]?.totalDebt || 0;
-            const marketCap = profile.mktCap || 1; 
+            const marketCap = (profile.marketCap ?? profile.mktCap) || 1; 
             const peerDE = totalDebt / marketCap;
             
             // Assume standard 21% tax rate for peers as approximation if we don't fetch their income statements
@@ -817,7 +817,7 @@ function calculateWACC(
 
     // Capital structure from FMP balance sheet
     const totalDebt = latestBalance.totalDebt || 0;
-    const marketCap = profile.mktCap || 0;
+    const marketCap = (profile.marketCap ?? profile.mktCap) || 0;
     const preferredStock = latestBalance.preferredStock || 0;
     const totalCapital = totalDebt + marketCap + preferredStock;
 
@@ -1287,7 +1287,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const baseRevenue = latestIncome.revenue;
     const currentPrice = priceResult.data.price;
     const filingDate = latestIncome.fillingDate;
-    const sharesOutstanding = enterpriseValues?.[0]?.numberOfShares || (profile.mktCap / profile.price) || 0;
+    const sharesOutstanding = enterpriseValues?.[0]?.numberOfShares || ((profile.marketCap ?? profile.mktCap) / profile.price) || 0;
 
     if (baseRevenue <= 0) {
         throw new APIError(`Cannot run DCF for ${sym}: latest revenue is zero or negative.`, { symbol: sym, baseRevenue });
@@ -1332,7 +1332,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`📊 [DCF] Step 6: Calculating peer beta & WACC...`);
     const sector = (profile.sector || 'DEFAULT').toUpperCase();
     const sectorDefaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
-    const targetDE = profile.mktCap > 0 ? (latestBalance.totalDebt || 0) / profile.mktCap : 0;
+    const targetDE = (profile.marketCap ?? profile.mktCap) > 0 ? (latestBalance.totalDebt || 0) / (profile.marketCap ?? profile.mktCap) : 0;
     const peerBetaResult = await calculatePeerBeta(
         bundle.peers,
         targetDE,
@@ -1509,7 +1509,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             analysisDate: new Date().toISOString(),
             financialInstitution: finCheck.isFinancialInstitution ? { type: finCheck.type, reason: finCheck.reason } : undefined,
         },
-        currentMarketData: { currentPrice, marketCap: profile.mktCap || 0, sharesOutstanding },
+        currentMarketData: { currentPrice, marketCap: (profile.marketCap ?? profile.mktCap) || 0, sharesOutstanding },
         growthAnalysis: {
             selectedGrowthRate: growth.rate, growthSource: growth.source,
             revenueCAGR3yr: growth.raw, normalizedFCFMargin: fcfMargin, fcffMethod: fcfMethod,
