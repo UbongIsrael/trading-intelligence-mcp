@@ -449,6 +449,15 @@ export function computeFCFF(
     };
 }
 
+function computeComponentFCFFMargin(
+    ebitdaMargin: number,
+    taxRate: number,
+    daToRevenue: number,
+    capexToRevenue: number,
+): number {
+    return (ebitdaMargin * (1 - taxRate)) + (daToRevenue * taxRate) - capexToRevenue;
+}
+
 /**
  * P2.5 — Compute exact fraction of year between two dates.
  * Used for fractional discounting per the spec's YEARFRAC requirement.
@@ -704,7 +713,7 @@ function calculateNormalizedFCFMargin(
                 ? Math.max(0, Math.min(inc.incomeTaxExpense / inc.incomeBeforeTax, 0.40))
                 : TAX_RATE;
             const da = cf.depreciationAndAmortization || 0;
-            const capex = cf.capitalExpenditure || 0; // FMP: positive number
+            const capex = Math.abs(cf.capitalExpenditure || 0);
             const wcCurrent = bsCurrent.totalCurrentAssets - bsCurrent.totalCurrentLiabilities;
             const wcPrior = bsPrior.totalCurrentAssets - bsPrior.totalCurrentLiabilities;
             const deltaWC = wcCurrent - wcPrior;
@@ -715,7 +724,7 @@ function calculateNormalizedFCFMargin(
             // Fallback: OCF - CapEx
             ocfCount++;
             const ocf = cf.operatingCashFlow || 0;
-            const capex = cf.capitalExpenditure || 0;
+            const capex = Math.abs(cf.capitalExpenditure || 0);
             if (ocf > 0) {
                 margins.push((ocf - capex) / inc.revenue);
             }
@@ -734,19 +743,20 @@ function calculateNormalizedFCFMargin(
 // ─────────────────────────────────────────────────────────
 
 /**
- * Project cash flows over 10 years with EBITDA-based FCFF.
- * Projects line items: revenue → EBITDA → CapEx → D&A → WC delta → FCFF.
+ * Project cash flows over 10 years using normalized FCFF margin.
+ * Projects line items for diagnostics, but base valuation uses normalized FCFF
+ * so temporary heavy capex does not get treated as a permanent margin reset.
  *   Phase 1 (years 1-5): full growth rate
  *   Phase 2 (years 6-10): linear fade toward terminal growth
  */
 function projectCashFlows(
     baseRevenue: number,
     growthRate: number,
-    _fcfMargin: number,  // retained for API compat; EBITDA components used instead
+    fcfMargin: number,
     ebitdaMargin: number,
     capexToRevenue: number,
     daToRevenue: number,
-    effectiveTaxRate: number,
+    _effectiveTaxRate: number,
     years: number = PROJECTION_YEARS,
     terminalGrowth: number = TERMINAL_GROWTH_RATE,
 ): DCFProjection[] {
@@ -769,8 +779,7 @@ function projectCashFlows(
         const da = revenue * daToRevenue;
         // WC delta approximated as stable ratio; real delta is captured in margin
         const workingCapitalDelta = 0;
-
-        const { fcff } = computeFCFF(ebitda, effectiveTaxRate, da, capex, workingCapitalDelta);
+        const fcff = revenue * fcfMargin;
 
         projections.push({
             year: y,
@@ -1240,6 +1249,7 @@ function generateWarnings(
     waccResult: { wacc: number; rawWacc: number; clamped: boolean; clampDirection?: 'floor' | 'ceiling' },
     valuation: { terminalValuePct: number },
     fcfMargin: number,
+    componentFCFFMargin: number,
 ): string[] {
     const warnings: string[] = [];
     if (growth.rate >= 0.30) warnings.push('Growth rate at or near ceiling (35%). High uncertainty.');
@@ -1252,6 +1262,10 @@ function generateWarnings(
     }
     if (valuation.terminalValuePct > 0.80) warnings.push('Terminal value exceeds 80% of total — sensitive to terminal assumptions.');
     if (fcfMargin < 0.08) warnings.push('Low FCF margin. Company may be in heavy investment phase.');
+    const marginGap = fcfMargin - componentFCFFMargin;
+    if (marginGap > 0.05) {
+        warnings.push(`Current EBITDA/CapEx components imply a ${(componentFCFFMargin * 100).toFixed(1)}% FCFF margin vs normalized ${(fcfMargin * 100).toFixed(1)}% — heavy current reinvestment may make component-based DCF too punitive.`);
+    }
     return warnings;
 }
 
@@ -1326,6 +1340,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const mr = calculateNormalizedFCFMargin(sortedIncome, sortedCashFlow, sortedBalance);
     const fcfMargin = mr.margin;
     const fcfMethod = mr.method;
+    const componentFCFFMargin = computeComponentFCFFMargin(ebitdaMargin, effectiveTaxRate, daToRevenue, capexToRevenue);
     console.log(`📊 [DCF] FCF margin: ${(fcfMargin * 100).toFixed(2)}% (${fcfMethod})`);
 
     // ─── 7. Peer Beta + WACC ─────────────────────────
@@ -1473,7 +1488,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
 
     // ─── 12. Warnings & output ───────────────────────
     const upside = (valuation.intrinsicValuePerShare - currentPrice) / currentPrice;
-    const warnings = generateWarnings(growth, waccResult, valuation, fcfMargin);
+    const warnings = generateWarnings(growth, waccResult, valuation, fcfMargin, componentFCFFMargin);
     if (growth.warning) warnings.push(growth.warning);
     // Note: GDP ceiling enforcement for user overrides happens in step 4 above (throws).
     // This warning catches auto-calculated edge cases (should be rare due to Math.min clamp).
@@ -1589,4 +1604,3 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`✅ [DCF v5] Complete for ${sym}. IV: $${valuation.intrinsicValuePerShare.toFixed(2)} | Price: $${currentPrice.toFixed(2)} | Upside: ${(upside * 100).toFixed(1)}%`);
     return result;
 }
-

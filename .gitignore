@@ -18,6 +18,7 @@ deployment/.env.production
 # Build outputs
 dist/
 build/
+build-artifacts/
 *.tsbuildinfo
 
 # IDE
