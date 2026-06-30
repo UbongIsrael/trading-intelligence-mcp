@@ -14,11 +14,15 @@ import {
     type ParsedRevenueSegment,
     fetchFMPProfile,
     fetchFMPBalanceSheet,
+    fetchFMPKeyMetrics,
+    type DCFDataBundle,
+    type FMPKeyMetrics,
 } from './fmp-data-service.js';
 // REMOVED: Alpha Vantage imports replaced by FMP data service (Phase 1 migration)
 // Alpha Vantage service retained for non-DCF tools (fundamentals-tool, contextual)
 import { getPrice } from './prices.js';
 import { APIError } from '../types.js';
+import { normalizeMarketData, type NormalizedMarketData } from './market-data-normalization.js';
 
 // ─────────────────────────────────────────────────────────
 // Constants
@@ -310,6 +314,9 @@ export interface DCFResult {
         currentPrice: number;
         marketCap: number;
         sharesOutstanding: number;
+        enterpriseValue?: number;
+        source?: string;
+        warnings?: string[];
     };
     growthAnalysis: {
         selectedGrowthRate: number;
@@ -390,7 +397,331 @@ export interface DCFResult {
     warnings: string[];
     sensitivityAnalysis?: SensitivityResult;
     footballField?: FootballFieldRange[];
+    valuationFramework?: ValuationFramework;
 }
+
+export type ValuationConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'UNSUITABLE';
+
+export interface ValuationRange {
+    label: string;
+    value: number;
+    upside: string;
+    model: string;
+}
+
+export interface RelativeValuationRange {
+    metric: string;
+    targetMultiple: number;
+    peerMedian: number | null;
+    peerLow: number | null;
+    peerHigh: number | null;
+    impliedValue: number;
+    peersUsed: string[];
+}
+
+export interface ValuationFramework {
+    primaryModel: string;
+    selectedFramework: string;
+    classification: {
+        valuationClass: string;
+        reinvestmentSubclass: string;
+        reasons: string[];
+    };
+    confidence: ValuationConfidence;
+    confidenceReasons: string[];
+    modelSelectionReasons: string[];
+    suitability: {
+        isSuitableForDCF: boolean;
+        message: string;
+    };
+    primaryResult: ValuationRange;
+    scenarioRange: {
+        bear: ValuationRange;
+        base: ValuationRange;
+        bull: ValuationRange;
+    };
+    reverseImpliedAssumptions: {
+        impliedGrowthRate: number;
+        impliedGrowthFormatted: string;
+        impliedExitMultiple: number | null;
+        interpretation: string;
+    };
+    relativeValuation?: {
+        ranges: RelativeValuationRange[];
+        summary: string;
+    };
+    marketData: NormalizedMarketData;
+    actualValues?: {
+        currentPrice: number;
+        marketCap: number;
+        sharesOutstanding: number;
+        bookEquity: number;
+        bookValuePerShare: number;
+        netIncome: number;
+        eps: number;
+        roe: number | null;
+        priceToBook: number | null;
+        priceToEarnings: number | null;
+    };
+    warnings: string[];
+}
+
+type TeslaScenarioProjectionYear = {
+    year: number;
+    revenue: number;
+    growth: number;
+    ebitdarMargin: number;
+    capexToRevenue: number;
+    ebit: number;
+    nopat: number;
+    fcff: number;
+};
+
+type TeslaScenarioValue = {
+    scenario: string;
+    wacc: number;
+    terminalGrowth: number;
+    enterpriseValue: number;
+    equityValue: number;
+    perShare: number;
+    sumPVFCFF: number;
+    discountedTerminalValue: number;
+    terminalPct: number;
+    impliedEVTo2033EBITDA: number;
+    projection: TeslaScenarioProjectionYear[];
+};
+
+type TeslaScenarioDCFResult = {
+    model: string;
+    price: number;
+    latestRevenue: number;
+    netDebt: number;
+    basicShares: number;
+    dilutedShares: number;
+    daToRevenue: number;
+    analystGrowth: number;
+    currentEnterpriseValue: number;
+    bear: TeslaScenarioValue;
+    base: TeslaScenarioValue;
+    bull: TeslaScenarioValue;
+    reverseTerminalGrowth: Array<{
+        scenario: string;
+        wacc: number;
+        requiredTerminalGrowth: number;
+        perShareAtRequiredGrowth: number;
+        flag: string;
+    }>;
+};
+
+type CapexHeavyProjectionYear = {
+    year: number;
+    revenue: number;
+    growth: number;
+    ebitdaMargin: number;
+    capexToRevenue: number;
+    workingCapitalToRevenue: number;
+    fcff: number;
+};
+
+type CapexHeavyScenarioValue = {
+    scenario: string;
+    wacc: number;
+    terminalGrowth: number;
+    enterpriseValue: number;
+    equityValue: number;
+    perShare: number;
+    sumPVFCFF: number;
+    discountedTerminalValue: number;
+    terminalPct: number;
+    projection: CapexHeavyProjectionYear[];
+};
+
+type CapexHeavyScaledReinvestorResult = {
+    model: string;
+    price: number;
+    latestRevenue: number;
+    netDebt: number;
+    dilutedShares: number;
+    analystGrowth: number;
+    currentEnterpriseValue: number;
+    daToRevenue: number;
+    capexToRevenue: number;
+    workingCapitalToRevenue: number;
+    sbcToRevenue: number;
+    ebitdaMargin: number;
+    forwardEbitdaMargin: number;
+    bear: CapexHeavyScenarioValue;
+    base: CapexHeavyScenarioValue;
+    bull: CapexHeavyScenarioValue;
+    reverseTerminalGrowth: Array<{
+        scenario: string;
+        wacc: number;
+        requiredTerminalGrowth: number;
+        perShareAtRequiredGrowth: number;
+        flag: string;
+    }>;
+};
+
+type ReinvestmentInputs = {
+    observedROIC: number;
+    observedReinvestmentRate: number;
+    observedImpliedGrowth: number;
+    ebitMargin: number;
+    taxRate: number;
+    capexToRevenue: number;
+    rndToRevenue: number;
+    sbcToRevenue: number;
+    acquisitionToRevenue: number;
+    medianAcquisitionToRevenue: number;
+    maxAcquisitionToRevenue: number;
+    acquisitionYears: number;
+    latestNOPAT: number;
+};
+
+type HighROICFadeBridgeCaps = {
+    phaseOneGrowthCap: number;
+    bridgeGrowthFloor: number;
+    terminalMarginCap: number;
+    terminalROICSpread: number;
+    stableROICCap: number;
+    fadeBridgeYears: number;
+    phaseTwoEnd: number;
+    label: string;
+};
+
+type ReinvestmentLifecycleYear = {
+    year: number;
+    revenue: number;
+    revenueGrowth: number;
+    roic: number;
+    reinvestmentRate: number;
+    nopat: number;
+    reinvestment: number;
+    fcff: number;
+    dilutedShares: number;
+};
+
+type ReinvestmentLifecycleResult = {
+    perShare: number;
+    enterpriseValue: number;
+    equityValue: number;
+    terminalPct: number;
+    reverseRequiredGrowth: number;
+    observedROIC: number;
+    observedReinvestmentRate: number;
+    observedImpliedGrowth: number;
+    stableROIC: number;
+    stableReinvestmentRate: number;
+    stableGrowth: number;
+    sbcDilutionRate: number;
+    model: string;
+    years: ReinvestmentLifecycleYear[];
+};
+
+type ProfitableReinvestmentFadeBridgeResult = {
+    model: string;
+    base: ReinvestmentLifecycleResult;
+    bull: ReinvestmentLifecycleResult;
+};
+
+type SemicapMidCycleScenario = {
+    scenario: string;
+    normalizedRevenue: number;
+    growth: number;
+    margin: number;
+    wacc: number;
+    terminalGrowth: number;
+    enterpriseValue: number;
+    equityValue: number;
+    perShare: number;
+    sumPVFCFF: number;
+    discountedTerminalValue: number;
+    terminalPct: number;
+};
+
+type SemicapMidCycleResult = {
+    model: string;
+    marketData: NormalizedMarketData;
+    latestRevenue: number;
+    midCycleRevenue: number;
+    cyclePosition: number;
+    secularTrend: number;
+    normalizedGrowth: number;
+    baseMargin: number;
+    bear: SemicapMidCycleScenario;
+    base: SemicapMidCycleScenario;
+    bull: SemicapMidCycleScenario;
+};
+
+type PharmaProductCycleProjectionYear = {
+    year: number;
+    revenue: number;
+    growth: number;
+    operatingMargin: number;
+    rndMaintenanceToRevenue: number;
+    fcff: number;
+};
+
+type PharmaProductCycleScenarioValue = {
+    scenario: string;
+    wacc: number;
+    terminalGrowth: number;
+    enterpriseValue: number;
+    equityValue: number;
+    perShare: number;
+    sumPVFCFF: number;
+    discountedTerminalValue: number;
+    terminalPct: number;
+    pipelineCreditPct: number;
+    projection: PharmaProductCycleProjectionYear[];
+};
+
+type PharmaProductCycleResult = {
+    model: string;
+    framework: 'product_cycle' | 'supercycle';
+    marketData: NormalizedMarketData;
+    latestRevenue: number;
+    historicalGrowth: number;
+    forwardGrowth: number;
+    growthSignal: number;
+    operatingMargin: number;
+    rndToRevenue: number;
+    adjustedOperatingMargin: number;
+    bear: PharmaProductCycleScenarioValue;
+    base: PharmaProductCycleScenarioValue;
+    bull: PharmaProductCycleScenarioValue;
+    reverseDiagnostics: {
+        currentEnterpriseValue: number;
+        requiredPipelineCredit: number;
+        requiredTerminalMargin: number;
+        requiredGrowthMultiplier: number;
+        requiredErosionStartYear: number | null;
+        notes: string[];
+    };
+};
+
+type UtilityDDMScenarioValue = {
+    scenario: string;
+    costOfEquity: number;
+    growthRate: number;
+    terminalGrowth: number;
+    payoutRatio: number;
+    dividendPerShare: number;
+    perShare: number;
+    stage1PV: number;
+    terminalPV: number;
+};
+
+type UtilityDDMResult = {
+    model: string;
+    latestEPS: number;
+    dividendPerShare: number;
+    payoutRatio: number;
+    costOfEquity: number;
+    bear: UtilityDDMScenarioValue;
+    base: UtilityDDMScenarioValue;
+    bull: UtilityDDMScenarioValue;
+};
 
 export interface QuickDCFResult {
     mode: string;
@@ -414,6 +745,1305 @@ export interface QuickDCFResult {
         value: number;
         discounted: number;
     };
+}
+
+// ─────────────────────────────────────────────────────────
+// Valuation Framework Helpers
+// ─────────────────────────────────────────────────────────
+
+function median(values: number[]): number {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function percentile(values: number[], p: number): number {
+    const sorted = [...values].sort((a, b) => a - b);
+    if (sorted.length === 0) return 0;
+    const index = (sorted.length - 1) * p;
+    const lower = Math.floor(index);
+    const upper = Math.ceil(index);
+    if (lower === upper) return sorted[lower];
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+}
+
+function classifyValuationFramework(
+    bundle: DCFDataBundle,
+    profile: FMPProfile,
+    growth: { rate: number },
+    fcfMargin: number,
+    capexToRevenue: number,
+    wacc: number,
+    keyMetrics: FMPKeyMetrics[] = [],
+): ValuationFramework['classification'] {
+    const sector = (profile.sector || '').toUpperCase();
+    const industry = (profile.industry || '').toUpperCase();
+    const country = (profile.country || '').toUpperCase();
+    const reasons: string[] = [
+        `sector=${profile.sector || 'Unknown'}`,
+        `industry=${profile.industry || 'Unknown'}`,
+        `growth=${(growth.rate * 100).toFixed(2)}%`,
+        `fcfMargin=${(fcfMargin * 100).toFixed(2)}%`,
+        `capexRevenue=${(capexToRevenue * 100).toFixed(2)}%`,
+        `wacc=${(wacc * 100).toFixed(2)}%`,
+    ];
+
+    let valuationClass = 'standard_operating';
+    if (profile.isAdr || (country && country !== 'US' && country !== 'USA' && country !== 'UNITED STATES')) {
+        valuationClass = 'adr_foreign';
+    } else if (sector.includes('FINANCIAL') || industry.includes('BANK') || industry.includes('INSURANCE') || industry.includes('CAPITAL MARKETS')) {
+        valuationClass = 'financial';
+    } else if (industry.includes('REIT') || industry.includes('REAL ESTATE INVESTMENT')) {
+        valuationClass = 'reit';
+    } else if (sector.includes('UTILITIES')) {
+        valuationClass = 'utility';
+    } else if (capexToRevenue >= 0.08 && fcfMargin <= 0.08) {
+        valuationClass = 'heavy_reinvestment';
+    } else if (growth.rate >= 0.15 || ((profile.beta ?? 1) >= 1.4 && growth.rate >= 0.08)) {
+        valuationClass = 'growth_optional';
+    } else if (sector.includes('CONSUMER DEFENSIVE') || (growth.rate <= 0.07 && (profile.beta ?? 1) <= 1.1 && fcfMargin >= 0.08)) {
+        valuationClass = 'mature_defensive';
+    } else if (sector.includes('ENERGY') || sector.includes('MATERIAL') || sector.includes('INDUSTRIAL') || industry.includes('AUTO')) {
+        valuationClass = 'cyclical';
+    }
+
+    let reinvestmentSubclass = 'not_reinvestment';
+    const reinvestmentInputs = computeHistoricalReinvestmentInputs(bundle, keyMetrics);
+    const looksReinvestment = (
+        reinvestmentInputs.capexToRevenue >= 0.06 ||
+        reinvestmentInputs.rndToRevenue >= 0.08 ||
+        reinvestmentInputs.sbcToRevenue >= 0.05 ||
+        growth.rate >= 0.08 ||
+        reinvestmentInputs.observedReinvestmentRate >= 0.25 ||
+        fcfMargin <= 0.08 ||
+        capexToRevenue >= 0.06
+    );
+    if (!looksReinvestment) {
+        reinvestmentSubclass = 'not_reinvestment';
+        reasons.push('Reinvestment subclass: low reinvestment intensity.');
+    } else if (reinvestmentInputs.latestNOPAT <= 0 || reinvestmentInputs.ebitMargin <= 0 || reinvestmentInputs.observedROIC < wacc * 0.85) {
+        reinvestmentSubclass = 'turnaround_or_low_roic_reinvestment';
+        reasons.push('Reinvestment subclass: NOPAT/margin/ROIC not currently investment-grade.');
+    } else {
+        reasons.push(
+            `ROIC=${(reinvestmentInputs.observedROIC * 100).toFixed(2)}%`,
+            `RR=${(reinvestmentInputs.observedReinvestmentRate * 100).toFixed(2)}%`,
+            `R&D/revenue=${(reinvestmentInputs.rndToRevenue * 100).toFixed(2)}%`,
+            `SBC/revenue=${(reinvestmentInputs.sbcToRevenue * 100).toFixed(2)}%`,
+            `acquisitions/revenue=${(reinvestmentInputs.acquisitionToRevenue * 100).toFixed(2)}%`,
+            `median acquisitions/revenue=${(reinvestmentInputs.medianAcquisitionToRevenue * 100).toFixed(2)}%`,
+            `acquisition years=${reinvestmentInputs.acquisitionYears}`,
+        );
+
+        if (industry.includes('SEMICONDUCTOR EQUIPMENT') || industry.includes('SEMICONDUCTOR MATERIAL') || ['LRCX', 'KLAC', 'AMAT', 'ASML'].includes(profile.symbol)) {
+            reinvestmentSubclass = 'cyclical_semicap_compounder';
+        } else if (['AVGO'].includes(profile.symbol)) {
+            reinvestmentSubclass = 'semiconductor_ai_acquisition_platform';
+        } else if (
+            sector.includes('HEALTHCARE') &&
+            (industry.includes('DRUG MANUFACTURERS') || industry.includes('PHARMACEUTICAL'))
+        ) {
+            reinvestmentSubclass = ['LLY'].includes(profile.symbol) || growth.rate >= 0.20
+                ? 'pharma_supercycle_compounder'
+                : 'pharma_product_cycle_compounder';
+        } else if (
+            sector.includes('HEALTHCARE') &&
+            (industry.includes('BIOTECH') || industry.includes('BIOTECHNOLOGY'))
+        ) {
+            reinvestmentSubclass = 'biotech_pipeline_compounder';
+        } else if (
+            reinvestmentInputs.observedROIC >= Math.max(wacc + 0.08, 0.18) &&
+            reinvestmentInputs.ebitMargin >= 0.20 &&
+            growth.rate >= 0 &&
+            growth.rate <= 0.18
+        ) {
+            reinvestmentSubclass = 'high_roic_mature_compounder';
+        } else if (sector.includes('TECHNOLOGY') && reinvestmentInputs.capexToRevenue < 0.06 && (reinvestmentInputs.rndToRevenue >= 0.12 || reinvestmentInputs.sbcToRevenue >= 0.07)) {
+            reinvestmentSubclass = 'capital_light_software_compounder';
+        } else if (reinvestmentInputs.capexToRevenue >= 0.10 && reinvestmentInputs.ebitMargin < 0.25) {
+            reinvestmentSubclass = 'capex_heavy_scaled_reinvestor';
+        } else if (
+            reinvestmentInputs.acquisitionToRevenue >= 0.12 &&
+            reinvestmentInputs.medianAcquisitionToRevenue >= 0.04 &&
+            reinvestmentInputs.acquisitionYears >= 2
+        ) {
+            reinvestmentSubclass = 'acquisition_platform';
+        } else {
+            reinvestmentSubclass = 'profitable_reinvestment_other';
+        }
+    }
+
+    return { valuationClass, reinvestmentSubclass, reasons };
+}
+
+function isUnsupportedFinancialForFramework(finCheck: ReturnType<typeof detectFinancialInstitution>): boolean {
+    return finCheck.isFinancialInstitution && ['BANK', 'INSURANCE', 'REIT'].includes(finCheck.type ?? '');
+}
+
+function buildActualValues(
+    latestIncome: FMPIncomeStatement,
+    latestBalance: FMPBalanceSheet,
+    marketData: NormalizedMarketData,
+): ValuationFramework['actualValues'] {
+    const bookEquity = latestBalance.totalStockholdersEquity || latestBalance.totalEquity || 0;
+    const bookValuePerShare = marketData.sharesOutstanding > 0 ? bookEquity / marketData.sharesOutstanding : 0;
+    const netIncome = latestIncome.netIncome || 0;
+    const eps = latestIncome.epsdiluted || (marketData.sharesOutstanding > 0 ? netIncome / marketData.sharesOutstanding : 0);
+    const roe = bookEquity > 0 ? netIncome / bookEquity : null;
+    return {
+        currentPrice: marketData.currentPrice,
+        marketCap: marketData.marketCap,
+        sharesOutstanding: marketData.sharesOutstanding,
+        bookEquity,
+        bookValuePerShare,
+        netIncome,
+        eps,
+        roe,
+        priceToBook: bookValuePerShare > 0 ? marketData.currentPrice / bookValuePerShare : null,
+        priceToEarnings: eps > 0 ? marketData.currentPrice / eps : null,
+    };
+}
+
+async function buildRelativeValuation(
+    bundle: { peers: string[] },
+    targetMetrics: FMPKeyMetrics[],
+    baseRevenue: number,
+    ebitdaMargin: number,
+    marketData: NormalizedMarketData,
+): Promise<ValuationFramework['relativeValuation']> {
+    const latestTarget = [...targetMetrics].sort((a, b) => b.date.localeCompare(a.date))[0];
+    const targetEVRevenue = marketData.enterpriseValue > 0 && baseRevenue > 0 ? marketData.enterpriseValue / baseRevenue : latestTarget?.evToSales;
+    const targetEVEBITDA = latestTarget?.enterpriseValueOverEBITDA || (ebitdaMargin > 0 ? targetEVRevenue / ebitdaMargin : 0);
+    const targetPE = latestTarget?.peRatio;
+    const selectedPeers = bundle.peers.slice(0, 6);
+    const peerRows = await Promise.all(selectedPeers.map(async peer => {
+        try {
+            const metrics = await fetchFMPKeyMetrics(peer, 'annual', 1);
+            const latest = metrics[0];
+            return latest ? { peer, latest } : null;
+        } catch {
+            return null;
+        }
+    }));
+    const usable = peerRows.filter((row): row is { peer: string; latest: FMPKeyMetrics } => Boolean(row));
+    const medianPositive = (values: number[]): number | null => {
+        const clean = values.filter(v => Number.isFinite(v) && v > 0 && v < 500);
+        return clean.length >= 2 ? median(clean) : null;
+    };
+    const makeRange = (
+        metric: string,
+        targetMultiple: number,
+        peerValues: number[],
+        impliedValueBuilder: (peerMedian: number) => number,
+    ): RelativeValuationRange | null => {
+        const clean = peerValues.filter(v => Number.isFinite(v) && v > 0 && v < 500);
+        if (!Number.isFinite(targetMultiple) || targetMultiple <= 0 || clean.length < 2) return null;
+        const peerMedian = median(clean);
+        return {
+            metric,
+            targetMultiple,
+            peerMedian,
+            peerLow: percentile(clean, 0.25),
+            peerHigh: percentile(clean, 0.75),
+            impliedValue: impliedValueBuilder(peerMedian),
+            peersUsed: usable.map(row => row.peer),
+        };
+    };
+
+    const ranges = [
+        makeRange(
+            'EV/Revenue',
+            targetEVRevenue,
+            usable.map(row => row.latest.evToSales),
+            peerMedian => marketData.sharesOutstanding > 0 ? ((peerMedian * baseRevenue) - marketData.netDebt) / marketData.sharesOutstanding : 0,
+        ),
+        makeRange(
+            'EV/EBITDA',
+            targetEVEBITDA,
+            usable.map(row => row.latest.enterpriseValueOverEBITDA),
+            peerMedian => marketData.sharesOutstanding > 0 ? ((peerMedian * baseRevenue * ebitdaMargin) - marketData.netDebt) / marketData.sharesOutstanding : 0,
+        ),
+        makeRange(
+            'P/E',
+            targetPE,
+            usable.map(row => row.latest.peRatio),
+            peerMedian => {
+                const targetPERatio = medianPositive(usable.map(row => row.latest.peRatio));
+                return targetPERatio && targetPE && targetPE > 0 ? marketData.currentPrice * (peerMedian / targetPE) : marketData.currentPrice;
+            },
+        ),
+    ].filter((range): range is RelativeValuationRange => Boolean(range));
+
+    if (ranges.length === 0) return undefined;
+    return {
+        ranges,
+        summary: `Peer multiple cross-check from ${usable.length} usable FMP peer(s). Treat as a boundary, not an intrinsic valuation anchor.`,
+    };
+}
+
+function buildValuationRange(label: string, value: number, currentPrice: number, model: string): ValuationRange {
+    return {
+        label,
+        value: Math.round(value * 100) / 100,
+        upside: currentPrice > 0 ? (((value - currentPrice) / currentPrice) * 100).toFixed(2) + '%' : 'N/A',
+        model,
+    };
+}
+
+function clamp(value: number, low: number, high: number): number {
+    return Math.max(low, Math.min(value, high));
+}
+
+function average(values: number[]): number {
+    const finite = values.filter(Number.isFinite);
+    return finite.length ? finite.reduce((sum, value) => sum + value, 0) / finite.length : 0;
+}
+
+function firstNumber(obj: Record<string, unknown>, keys: string[]): number | undefined {
+    for (const key of keys) {
+        const value = obj[key];
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return undefined;
+}
+
+function estimateRevenueAvg(estimate: Record<string, unknown>): number | undefined {
+    return firstNumber(estimate, ['estimatedRevenueAvg', 'revenueAvg']);
+}
+
+function estimateEpsAvg(estimate: Record<string, unknown>): number | undefined {
+    return firstNumber(estimate, ['estimatedEpsAvg', 'epsAvg']);
+}
+
+function simpleCAGR(startValue: number, endValue: number, years: number): number | null {
+    if (startValue <= 0 || endValue <= 0 || years <= 0) return null;
+    return Math.pow(endValue / startValue, 1 / years) - 1;
+}
+
+function computeInvestedCapital(balance: FMPBalanceSheet): number {
+    const debt = balance.totalDebt || 0;
+    const equity = balance.totalStockholdersEquity || balance.totalEquity || 0;
+    const cash = balance.cashAndShortTermInvestments || balance.cashAndCashEquivalents || 0;
+    const investedCapital = debt + equity - cash;
+    return investedCapital > 0 ? investedCapital : balance.totalAssets - balance.cashAndCashEquivalents;
+}
+
+function computeShareDilutionRate(incomeStatements: FMPIncomeStatement[]): number {
+    const sorted = [...incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestShares = sorted[0]?.weightedAverageShsOutDil || 0;
+    const priorShares = sorted[Math.min(3, sorted.length - 1)]?.weightedAverageShsOutDil || 0;
+    const years = Math.min(3, sorted.length - 1);
+    const dilution = years > 0 ? simpleCAGR(priorShares, latestShares, years) : null;
+    return clamp(dilution ?? 0, -0.03, 0.05);
+}
+
+function computeRDAmortization(incomeStatements: FMPIncomeStatement[], index: number): number {
+    const values = [
+        incomeStatements[index]?.researchAndDevelopmentExpenses || 0,
+        incomeStatements[index + 1]?.researchAndDevelopmentExpenses || 0,
+        incomeStatements[index + 2]?.researchAndDevelopmentExpenses || 0,
+    ].filter(v => v > 0);
+    return average(values);
+}
+
+function computeHistoricalReinvestmentInputs(
+    bundle: DCFDataBundle,
+    keyMetrics: FMPKeyMetrics[],
+): ReinvestmentInputs {
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const cashFlow = [...bundle.cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const balance = [...bundle.balanceSheets].sort((a, b) => b.date.localeCompare(a.date));
+    const metrics = [...keyMetrics].sort((a, b) => b.date.localeCompare(a.date));
+    const years = Math.min(3, income.length, cashFlow.length, balance.length);
+    const roics: number[] = [];
+    const reinvestmentRates: number[] = [];
+    const ebitMargins: number[] = [];
+    const taxRates: number[] = [];
+    const capexRates: number[] = [];
+    const rndRates: number[] = [];
+    const sbcRates: number[] = [];
+    const acquisitionRates: number[] = [];
+    let latestNOPAT = 0;
+
+    for (let i = 0; i < years; i++) {
+        const inc = income[i];
+        const cf = cashFlow[i];
+        const bs = balance[i];
+        const revenue = inc.revenue || 1;
+        const taxRate = inc.incomeBeforeTax > 0 ? clamp(inc.incomeTaxExpense / inc.incomeBeforeTax, 0.05, 0.30) : TAX_RATE;
+        const rdAmortization = computeRDAmortization(income, i);
+        const adjustedEBIT = inc.operatingIncome + (inc.researchAndDevelopmentExpenses || 0) - rdAmortization;
+        const nopat = adjustedEBIT * (1 - taxRate);
+        if (i === 0) latestNOPAT = nopat;
+        const metricROIC = metrics.find(m => m.date === inc.date)?.roic;
+        const investedCapital = computeInvestedCapital(bs);
+        const computedROIC = investedCapital > 0 ? nopat / investedCapital : 0;
+        const roic = metricROIC && Number.isFinite(metricROIC) && metricROIC > 0 ? metricROIC : computedROIC;
+        const da = cf.depreciationAndAmortization || inc.depreciationAndAmortization || 0;
+        const capex = Math.abs(cf.capitalExpenditure || 0);
+        const workingCapitalInvestment = -(cf.changeInWorkingCapital || 0);
+        const capitalizedRnD = inc.researchAndDevelopmentExpenses || 0;
+        const acquisitions = Math.abs(cf.acquisitionsNet || 0);
+        const reinvestment = capex + workingCapitalInvestment + capitalizedRnD - da;
+        const reinvestmentRate = nopat > 0 ? reinvestment / nopat : 0;
+
+        if (Number.isFinite(roic) && roic > 0) roics.push(roic);
+        if (Number.isFinite(reinvestmentRate)) reinvestmentRates.push(reinvestmentRate);
+        if (Number.isFinite(adjustedEBIT / revenue)) ebitMargins.push(adjustedEBIT / revenue);
+        taxRates.push(taxRate);
+        capexRates.push(capex / revenue);
+        rndRates.push((inc.researchAndDevelopmentExpenses || 0) / revenue);
+        sbcRates.push((cf.stockBasedCompensation || 0) / revenue);
+        acquisitionRates.push(acquisitions / revenue);
+    }
+
+    const observedROIC = clamp(roics.length ? median(roics) : 0.12, 0.03, 1.20);
+    const observedReinvestmentRate = clamp(reinvestmentRates.length ? median(reinvestmentRates) : 0.35, 0.00, 1.20);
+    const observedImpliedGrowth = clamp(observedROIC * observedReinvestmentRate, -0.05, 0.35);
+
+    return {
+        observedROIC,
+        observedReinvestmentRate,
+        observedImpliedGrowth,
+        ebitMargin: clamp(ebitMargins.length ? median(ebitMargins) : 0.10, -0.20, 0.65),
+        taxRate: clamp(taxRates.length ? median(taxRates) : TAX_RATE, 0.05, 0.30),
+        capexToRevenue: average(capexRates),
+        rndToRevenue: average(rndRates),
+        sbcToRevenue: average(sbcRates),
+        acquisitionToRevenue: average(acquisitionRates),
+        medianAcquisitionToRevenue: acquisitionRates.length ? median(acquisitionRates) : 0,
+        maxAcquisitionToRevenue: acquisitionRates.length ? Math.max(...acquisitionRates) : 0,
+        acquisitionYears: acquisitionRates.filter(rate => rate >= 0.03).length,
+        latestNOPAT,
+    };
+}
+
+function isUsableNormalizedForeignMarketData(marketData: NormalizedMarketData): boolean {
+    const hasAmbiguousCurrencyWarning = marketData.warnings.some(w => w.toLowerCase().includes('currency/listing mismatch is ambiguous'));
+    return marketData.financialStatementScale > 0 && Number.isFinite(marketData.financialStatementScale) && !hasAmbiguousCurrencyWarning;
+}
+
+function highROICFadeBridgeCaps(bundle: DCFDataBundle): HighROICFadeBridgeCaps {
+    const profile = bundle.profile;
+    const sector = (profile.sector || '').toUpperCase();
+    const industry = (profile.industry || '').toUpperCase();
+    const marketCap = (profile.marketCap ?? profile.mktCap) || 0;
+    const megaCap = marketCap >= 500e9;
+
+    if (sector.includes('HEALTHCARE') || sector.includes('HEALTH CARE') || industry.includes('PHARMA') || industry.includes('BIOTECH')) {
+        return { phaseOneGrowthCap: 0.10, bridgeGrowthFloor: 0.045, terminalMarginCap: 0.32, terminalROICSpread: 0.03, stableROICCap: 0.24, fadeBridgeYears: 15, phaseTwoEnd: 7, label: 'healthcare_pharma_cap' };
+    }
+    if (sector.includes('CONSUMER DEFENSIVE') || sector.includes('CONSUMER STAPLES')) {
+        return { phaseOneGrowthCap: 0.08, bridgeGrowthFloor: 0.04, terminalMarginCap: 0.28, terminalROICSpread: 0.025, stableROICCap: 0.22, fadeBridgeYears: 15, phaseTwoEnd: 7, label: 'consumer_defensive_cap' };
+    }
+    if (sector.includes('INDUSTRIAL') || sector.includes('MATERIAL') || sector.includes('ENERGY')) {
+        return { phaseOneGrowthCap: 0.10, bridgeGrowthFloor: 0.04, terminalMarginCap: 0.22, terminalROICSpread: 0.025, stableROICCap: 0.22, fadeBridgeYears: 15, phaseTwoEnd: 7, label: 'industrial_cyclical_cap' };
+    }
+    if (industry.includes('SEMICONDUCTOR')) {
+        return { phaseOneGrowthCap: megaCap ? 0.16 : 0.20, bridgeGrowthFloor: 0.055, terminalMarginCap: 0.35, terminalROICSpread: megaCap ? 0.055 : 0.07, stableROICCap: 0.32, fadeBridgeYears: megaCap ? 18 : 20, phaseTwoEnd: megaCap ? 8 : 10, label: megaCap ? 'mega_cap_semiconductor_cap' : 'semiconductor_cap' };
+    }
+    if (sector.includes('TECHNOLOGY') || sector.includes('COMMUNICATION')) {
+        return { phaseOneGrowthCap: megaCap ? 0.15 : 0.22, bridgeGrowthFloor: megaCap ? 0.05 : 0.06, terminalMarginCap: 0.35, terminalROICSpread: megaCap ? 0.04 : 0.06, stableROICCap: megaCap ? 0.28 : 0.32, fadeBridgeYears: megaCap ? 16 : 20, phaseTwoEnd: megaCap ? 7 : 10, label: megaCap ? 'mega_cap_platform_cap' : 'software_platform_cap' };
+    }
+    return { phaseOneGrowthCap: 0.12, bridgeGrowthFloor: 0.045, terminalMarginCap: 0.30, terminalROICSpread: 0.03, stableROICCap: 0.26, fadeBridgeYears: 16, phaseTwoEnd: 8, label: 'default_high_roic_cap' };
+}
+
+function valueTeslaScenarioDCF(bundle: DCFDataBundle, marketData: NormalizedMarketData): TeslaScenarioDCFResult {
+    const START_YEAR = 2026;
+    const END_YEAR = 2033;
+    const TAX_RATE_SCENARIO = 0.21;
+    const TESLA_SBC_COST = 1.8e9;
+    const TESLA_DILUTED_SHARES = 3.448e9;
+    const years = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const cashFlow = [...bundle.cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestRevenue = income[0]?.revenue || 0;
+    const basicShares = marketData.sharesOutstanding;
+    const daToRevenue = latestRevenue > 0
+        ? ((cashFlow[0]?.depreciationAndAmortization || income[0]?.depreciationAndAmortization || 0) / latestRevenue)
+        : 0.0648;
+    const analystGrowth = clamp(selectGrowthRate(bundle.incomeStatements, bundle.analystEstimates).rate, 0.10, 0.35);
+
+    type TeslaScenarioAssumption = {
+        scenario: string;
+        wacc: number;
+        terminalGrowth: number;
+        firstGrowth: number;
+        terminalBridgeGrowth: number;
+        ebitdarStart: number;
+        ebitdarEnd: number;
+        capexStart: number;
+        capexEnd: number;
+    };
+
+    const valueAssumption = (assumption: TeslaScenarioAssumption): TeslaScenarioValue => {
+        let revenue = latestRevenue;
+        let sumPVFCFF = 0;
+        let finalFCFF = 0;
+        const projection: TeslaScenarioProjectionYear[] = [];
+
+        for (const year of years) {
+            const t = (year - START_YEAR) / (END_YEAR - START_YEAR);
+            const growth = assumption.firstGrowth + (assumption.terminalBridgeGrowth - assumption.firstGrowth) * t;
+            const ebitdarMargin = assumption.ebitdarStart + (assumption.ebitdarEnd - assumption.ebitdarStart) * t;
+            const capexToRevenue = assumption.capexStart + (assumption.capexEnd - assumption.capexStart) * t;
+            revenue *= 1 + growth;
+            const ebitdar = revenue * ebitdarMargin;
+            const da = revenue * daToRevenue;
+            const ebit = ebitdar - da - TESLA_SBC_COST;
+            const nopat = ebit * (1 - TAX_RATE_SCENARIO);
+            const capex = revenue * capexToRevenue;
+            const fcff = nopat + da - capex;
+            const yearIndex = year - START_YEAR + 1;
+            finalFCFF = fcff;
+            sumPVFCFF += fcff / Math.pow(1 + assumption.wacc, yearIndex);
+            projection.push({ year, revenue, growth, ebitdarMargin, capexToRevenue, ebit, nopat, fcff });
+        }
+
+        const terminalGrowth = clamp(assumption.terminalGrowth, -0.02, assumption.wacc - 0.005);
+        const terminalValue = (finalFCFF * (1 + terminalGrowth)) / (assumption.wacc - terminalGrowth);
+        const discountedTerminalValue = terminalValue / Math.pow(1 + assumption.wacc, years.length);
+        const enterpriseValue = sumPVFCFF + discountedTerminalValue;
+        const equityValue = enterpriseValue - marketData.netDebt;
+        const finalProjection = projection[projection.length - 1];
+        const finalEBITDA = finalProjection
+            ? finalProjection.ebit + finalProjection.revenue * daToRevenue + TESLA_SBC_COST
+            : 0;
+
+        return {
+            scenario: assumption.scenario,
+            wacc: assumption.wacc,
+            terminalGrowth,
+            enterpriseValue,
+            equityValue,
+            perShare: TESLA_DILUTED_SHARES > 0 ? equityValue / TESLA_DILUTED_SHARES : 0,
+            sumPVFCFF,
+            discountedTerminalValue,
+            terminalPct: enterpriseValue > 0 ? discountedTerminalValue / enterpriseValue : 0,
+            impliedEVTo2033EBITDA: finalEBITDA > 0 ? enterpriseValue / finalEBITDA : 0,
+            projection,
+        };
+    };
+
+    const assumptions: TeslaScenarioAssumption[] = [
+        {
+            scenario: 'bear_company_beta',
+            wacc: 0.14,
+            terminalGrowth: 0.025,
+            firstGrowth: Math.min(analystGrowth, 0.18),
+            terminalBridgeGrowth: 0.025,
+            ebitdarStart: 0.145,
+            ebitdarEnd: 0.13,
+            capexStart: 0.116,
+            capexEnd: 0.05,
+        },
+        {
+            scenario: 'base_industry_beta',
+            wacc: 0.091,
+            terminalGrowth: 0.03,
+            firstGrowth: 0.225,
+            terminalBridgeGrowth: 0.03,
+            ebitdarStart: 0.163,
+            ebitdarEnd: 0.15,
+            capexStart: 0.116,
+            capexEnd: 0.03,
+        },
+        {
+            scenario: 'bull_industry_beta',
+            wacc: 0.091,
+            terminalGrowth: 0.04,
+            firstGrowth: 0.26,
+            terminalBridgeGrowth: 0.04,
+            ebitdarStart: 0.17,
+            ebitdarEnd: 0.165,
+            capexStart: 0.10,
+            capexEnd: 0.03,
+        },
+    ];
+
+    const [bear, base, bull] = assumptions.map(valueAssumption);
+    const currentEnterpriseValue = marketData.currentPrice * TESLA_DILUTED_SHARES + marketData.netDebt;
+    const reverseTerminalGrowth = assumptions.map(assumption => {
+        let low = -0.02;
+        let high = Math.min(assumption.wacc - 0.005, 0.09);
+        for (let i = 0; i < 80; i++) {
+            const mid = (low + high) / 2;
+            const value = valueAssumption({ ...assumption, terminalGrowth: mid });
+            if (value.enterpriseValue < currentEnterpriseValue) low = mid;
+            else high = mid;
+        }
+        const requiredTerminalGrowth = (low + high) / 2;
+        const valueAtRequiredGrowth = valueAssumption({ ...assumption, terminalGrowth: requiredTerminalGrowth });
+        return {
+            scenario: assumption.scenario,
+            wacc: assumption.wacc,
+            requiredTerminalGrowth,
+            perShareAtRequiredGrowth: valueAtRequiredGrowth.perShare,
+            flag: requiredTerminalGrowth >= 0.07 ? 'approaches/aggressive 7%+' : 'below 7%',
+        };
+    });
+
+    return {
+        model: 'tesla_scenario_required_dcf',
+        price: marketData.currentPrice,
+        latestRevenue,
+        netDebt: marketData.netDebt,
+        basicShares,
+        dilutedShares: TESLA_DILUTED_SHARES,
+        daToRevenue,
+        analystGrowth,
+        currentEnterpriseValue,
+        bear,
+        base,
+        bull,
+        reverseTerminalGrowth,
+    };
+}
+
+function valueCapexHeavyScaledReinvestorDCF(
+    bundle: DCFDataBundle,
+    marketData: NormalizedMarketData,
+    waccInput: number,
+): CapexHeavyScaledReinvestorResult {
+    const projectionStartYear = Number(
+        [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date))[0]?.calendarYear ||
+        [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date))[0]?.date.slice(0, 4) ||
+        new Date().getFullYear(),
+    ) + 1;
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const cashFlow = [...bundle.cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestIncome = income[0];
+    const latestRevenue = latestIncome?.revenue || 0;
+    const dilutedShares = marketData.sharesOutstanding;
+    const recentIncome = income.slice(0, 3);
+    const recentCashFlow = cashFlow.slice(0, 3);
+    const safeAverage = (values: number[], fallback: number) => {
+        const finite = values.filter(Number.isFinite);
+        return finite.length ? finite.reduce((sum, value) => sum + value, 0) / finite.length : fallback;
+    };
+    const taxRate = latestIncome?.incomeBeforeTax && latestIncome.incomeBeforeTax > 0
+        ? clamp(latestIncome.incomeTaxExpense / latestIncome.incomeBeforeTax, 0.10, 0.28)
+        : TAX_RATE;
+    const daToRevenue = safeAverage(
+        recentCashFlow.map((cf, i) => (cf.depreciationAndAmortization || recentIncome[i]?.depreciationAndAmortization || 0) / (recentIncome[i]?.revenue || 1)),
+        0.08,
+    );
+    const capexToRevenue = safeAverage(
+        recentCashFlow.map((cf, i) => Math.abs(cf.capitalExpenditure || 0) / (recentIncome[i]?.revenue || 1)),
+        0.12,
+    );
+    const workingCapitalToRevenue = safeAverage(
+        recentCashFlow.map((cf, i) => -(cf.changeInWorkingCapital || 0) / (recentIncome[i]?.revenue || 1)),
+        0.00,
+    );
+    const sbcToRevenue = safeAverage(
+        recentCashFlow.map((cf, i) => (cf.stockBasedCompensation || 0) / (recentIncome[i]?.revenue || 1)),
+        0.03,
+    );
+    const ebitdaMargin = safeAverage(
+        recentIncome.map(inc => inc.ebitda / (inc.revenue || 1)),
+        0.18,
+    );
+    const analystGrowth = clamp(selectGrowthRate(bundle.incomeStatements, bundle.analystEstimates).rate, 0.00, 0.30);
+    const forwardEstimate = [...bundle.analystEstimates]
+        .filter(e => (e.estimatedRevenueAvg ?? 0) > 0)
+        .sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''))[0];
+    const forwardRevenue = forwardEstimate?.estimatedRevenueAvg;
+    const forwardEbitda = forwardEstimate?.estimatedEbitdaAvg;
+    const forwardEbitdaMargin = forwardRevenue && forwardEbitda ? forwardEbitda / forwardRevenue : ebitdaMargin;
+
+    type CapexHeavyAssumption = {
+        scenario: string;
+        wacc: number;
+        firstGrowth: number;
+        terminalGrowth: number;
+        ebitdaEnd: number;
+        capexEnd: number;
+        workingCapitalEnd: number;
+    };
+
+    const assumptions: CapexHeavyAssumption[] = [
+        {
+            scenario: 'bear_capex_fade',
+            wacc: Math.max(waccInput, 0.125),
+            firstGrowth: Math.min(analystGrowth, 0.09),
+            terminalGrowth: 0.025,
+            ebitdaEnd: Math.max(ebitdaMargin, 0.22),
+            capexEnd: 0.07,
+            workingCapitalEnd: 0.005,
+        },
+        {
+            scenario: 'base_tsla_directional_capex_fade',
+            wacc: Math.min(waccInput, 0.095),
+            firstGrowth: Math.max(analystGrowth, 0.13),
+            terminalGrowth: 0.03,
+            ebitdaEnd: Math.max(forwardEbitdaMargin, 0.25),
+            capexEnd: 0.05,
+            workingCapitalEnd: 0.00,
+        },
+        {
+            scenario: 'bull_tsla_directional_capex_fade',
+            wacc: Math.min(waccInput, 0.09),
+            firstGrowth: Math.max(analystGrowth, 0.15),
+            terminalGrowth: 0.035,
+            ebitdaEnd: Math.max(forwardEbitdaMargin + 0.02, 0.28),
+            capexEnd: 0.04,
+            workingCapitalEnd: -0.005,
+        },
+    ];
+
+    const valueAssumption = (assumption: CapexHeavyAssumption): CapexHeavyScenarioValue => {
+        let revenue = latestRevenue;
+        let sumPVFCFF = 0;
+        let finalFCFF = 0;
+        const projection: CapexHeavyProjectionYear[] = [];
+
+        for (let year = 1; year <= PROJECTION_YEARS; year++) {
+            const t = PROJECTION_YEARS > 1 ? (year - 1) / (PROJECTION_YEARS - 1) : 1;
+            const growth = assumption.firstGrowth + (assumption.terminalGrowth - assumption.firstGrowth) * t;
+            const projectedEbitdaMargin = ebitdaMargin + (assumption.ebitdaEnd - ebitdaMargin) * t;
+            const projectedCapexToRevenue = capexToRevenue + (assumption.capexEnd - capexToRevenue) * t;
+            const projectedWorkingCapitalToRevenue = workingCapitalToRevenue + (assumption.workingCapitalEnd - workingCapitalToRevenue) * t;
+            revenue *= 1 + growth;
+            const ebitda = revenue * projectedEbitdaMargin;
+            const da = revenue * daToRevenue;
+            const sbc = revenue * sbcToRevenue;
+            const ebit = ebitda - da - sbc;
+            const nopat = ebit * (1 - taxRate);
+            const capex = revenue * projectedCapexToRevenue;
+            const workingCapitalInvestment = revenue * projectedWorkingCapitalToRevenue;
+            const fcff = nopat + da - capex - workingCapitalInvestment;
+            finalFCFF = fcff;
+            sumPVFCFF += fcff / Math.pow(1 + assumption.wacc, year);
+            projection.push({
+                year: projectionStartYear + year - 1,
+                revenue,
+                growth,
+                ebitdaMargin: projectedEbitdaMargin,
+                capexToRevenue: projectedCapexToRevenue,
+                workingCapitalToRevenue: projectedWorkingCapitalToRevenue,
+                fcff,
+            });
+        }
+
+        const terminalGrowth = clamp(assumption.terminalGrowth, -0.02, assumption.wacc - 0.005);
+        const terminalValue = (finalFCFF * (1 + terminalGrowth)) / (assumption.wacc - terminalGrowth);
+        const discountedTerminalValue = terminalValue / Math.pow(1 + assumption.wacc, PROJECTION_YEARS);
+        const enterpriseValue = sumPVFCFF + discountedTerminalValue;
+        const equityValue = enterpriseValue - marketData.netDebt;
+
+        return {
+            scenario: assumption.scenario,
+            wacc: assumption.wacc,
+            terminalGrowth,
+            enterpriseValue,
+            equityValue,
+            perShare: dilutedShares > 0 ? equityValue / dilutedShares : 0,
+            sumPVFCFF,
+            discountedTerminalValue,
+            terminalPct: enterpriseValue > 0 ? discountedTerminalValue / enterpriseValue : 0,
+            projection,
+        };
+    };
+
+    const [bear, base, bull] = assumptions.map(valueAssumption);
+    const reverseTerminalGrowth = assumptions.map(assumption => {
+        let low = -0.02;
+        let high = Math.min(assumption.wacc - 0.005, 0.09);
+        for (let i = 0; i < 80; i++) {
+            const mid = (low + high) / 2;
+            const value = valueAssumption({ ...assumption, terminalGrowth: mid });
+            if (value.enterpriseValue < marketData.enterpriseValue) low = mid;
+            else high = mid;
+        }
+        const requiredTerminalGrowth = (low + high) / 2;
+        const valueAtRequiredGrowth = valueAssumption({ ...assumption, terminalGrowth: requiredTerminalGrowth });
+        return {
+            scenario: assumption.scenario,
+            wacc: assumption.wacc,
+            requiredTerminalGrowth,
+            perShareAtRequiredGrowth: valueAtRequiredGrowth.perShare,
+            flag: requiredTerminalGrowth >= 0.07 ? 'approaches/aggressive 7%+' : 'below 7%',
+        };
+    });
+
+    return {
+        model: 'capex_heavy_scaled_reinvestor_tsla_directional_dcf',
+        price: marketData.currentPrice,
+        latestRevenue,
+        netDebt: marketData.netDebt,
+        dilutedShares,
+        analystGrowth,
+        currentEnterpriseValue: marketData.enterpriseValue,
+        daToRevenue,
+        capexToRevenue,
+        workingCapitalToRevenue,
+        sbcToRevenue,
+        ebitdaMargin,
+        forwardEbitdaMargin,
+        bear,
+        base,
+        bull,
+        reverseTerminalGrowth,
+    };
+}
+
+function valueHighROICMatureFadeBridgeFCFF(
+    bundle: DCFDataBundle,
+    keyMetrics: FMPKeyMetrics[],
+    analystGrowth: { rate: number },
+    wacc: number,
+    sharesOutstanding: number,
+    netDebt: number,
+): ReinvestmentLifecycleResult {
+    const caps = highROICFadeBridgeCaps(bundle);
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestRevenue = income[0]?.revenue || 0;
+    const inputs = computeHistoricalReinvestmentInputs(bundle, keyMetrics);
+    const stableGrowth = Math.min(TERMINAL_GROWTH_RATE, wacc - 0.01);
+    const stableROIC = clamp(wacc + caps.terminalROICSpread, wacc + 0.005, caps.stableROICCap);
+    const stableReinvestmentRate = clamp(stableGrowth / stableROIC, 0.04, 0.35);
+    const phaseOneGrowth = Math.min(
+        Math.max(analystGrowth.rate, inputs.observedROIC * Math.min(inputs.observedReinvestmentRate, 0.55)),
+        caps.phaseOneGrowthCap,
+    );
+    const phaseOneROIC = inputs.observedROIC;
+    const currentMargin = inputs.ebitMargin;
+    const terminalMargin = Math.min(Math.max(currentMargin, 0.05), caps.terminalMarginCap);
+    const sbcDilutionRate = computeShareDilutionRate(income);
+    const years: ReinvestmentLifecycleYear[] = [];
+    let revenue = latestRevenue;
+    let shares = sharesOutstanding;
+    let sumPVFCFF = 0;
+    let finalFCFF = 0;
+
+    for (let year = 1; year <= caps.fadeBridgeYears; year++) {
+        let revenueGrowth: number;
+        let roic: number;
+
+        if (year <= PHASE_1_YEARS) {
+            revenueGrowth = phaseOneGrowth;
+            roic = phaseOneROIC;
+        } else if (year <= caps.phaseTwoEnd) {
+            const fade = (year - PHASE_1_YEARS) / (caps.phaseTwoEnd - PHASE_1_YEARS);
+            const bridgeGrowth = Math.max(caps.bridgeGrowthFloor, stableGrowth + 0.02);
+            revenueGrowth = phaseOneGrowth - (phaseOneGrowth - bridgeGrowth) * fade;
+            roic = phaseOneROIC - (phaseOneROIC - stableROIC) * fade * 0.65;
+        } else {
+            const fade = (year - caps.phaseTwoEnd) / (caps.fadeBridgeYears - caps.phaseTwoEnd);
+            const bridgeGrowth = Math.max(caps.bridgeGrowthFloor, stableGrowth + 0.02);
+            const phaseTwoROIC = phaseOneROIC - (phaseOneROIC - stableROIC) * 0.65;
+            revenueGrowth = bridgeGrowth - (bridgeGrowth - stableGrowth) * fade;
+            roic = phaseTwoROIC - (phaseTwoROIC - stableROIC) * fade;
+        }
+
+        revenueGrowth = clamp(revenueGrowth, -0.05, 0.35);
+        roic = clamp(roic, 0.03, 1.20);
+        const reinvestmentRate = clamp(revenueGrowth / roic, stableReinvestmentRate, 0.95);
+        const marginFade = caps.fadeBridgeYears > 1 ? (year - 1) / (caps.fadeBridgeYears - 1) : 1;
+        const adjustedMargin = currentMargin + (terminalMargin - currentMargin) * marginFade;
+        revenue *= 1 + revenueGrowth;
+        shares *= 1 + sbcDilutionRate;
+        const nopat = revenue * adjustedMargin * (1 - inputs.taxRate);
+        const reinvestment = Math.max(0, nopat * reinvestmentRate);
+        const fcff = nopat - reinvestment;
+        finalFCFF = fcff;
+        sumPVFCFF += fcff / Math.pow(1 + wacc, year);
+        years.push({ year, revenue, revenueGrowth, roic, reinvestmentRate, nopat, reinvestment, fcff, dilutedShares: shares });
+    }
+
+    const terminalValue = (finalFCFF * (1 + stableGrowth)) / (wacc - stableGrowth);
+    const discountedTV = terminalValue / Math.pow(1 + wacc, caps.fadeBridgeYears);
+    const enterpriseValue = sumPVFCFF + discountedTV;
+    const equityValue = enterpriseValue - netDebt;
+    const perShare = shares > 0 ? equityValue / shares : 0;
+    const marketCap = (bundle.profile.marketCap ?? bundle.profile.mktCap) || sharesOutstanding * (bundle.profile.price || 0);
+    const currentEnterpriseValue = marketCap + netDebt;
+    const reverseRequiredGrowth = finalFCFF > 0 && currentEnterpriseValue > sumPVFCFF
+        ? clamp(((currentEnterpriseValue - sumPVFCFF) * Math.pow(1 + wacc, caps.fadeBridgeYears) * (wacc - stableGrowth)) / finalFCFF - 1, -0.50, 1.00)
+        : 0;
+
+    return {
+        perShare: Number.isFinite(perShare) ? perShare : 0,
+        enterpriseValue,
+        equityValue,
+        terminalPct: enterpriseValue > 0 ? discountedTV / enterpriseValue : 0,
+        reverseRequiredGrowth,
+        observedROIC: inputs.observedROIC,
+        observedReinvestmentRate: inputs.observedReinvestmentRate,
+        observedImpliedGrowth: inputs.observedImpliedGrowth,
+        stableROIC,
+        stableReinvestmentRate,
+        stableGrowth,
+        sbcDilutionRate,
+        model: 'high_roic_mature_fade_bridge_fcff',
+        years,
+    };
+}
+
+function valueProfitableReinvestmentFadeBridgeFCFF(
+    bundle: DCFDataBundle,
+    keyMetrics: FMPKeyMetrics[],
+    analystGrowth: { rate: number },
+    wacc: number,
+    sharesOutstanding: number,
+    netDebt: number,
+): ProfitableReinvestmentFadeBridgeResult {
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestRevenue = income[0]?.revenue || 0;
+    const inputs = computeHistoricalReinvestmentInputs(bundle, keyMetrics);
+    const sbcDilutionRate = Math.max(0, computeShareDilutionRate(income));
+
+    const buildCase = (
+        label: string,
+        projectionYears: number,
+        phaseOneGrowth: number,
+        terminalMargin: number,
+        stableROICSpread: number,
+        caseWacc: number,
+    ): ReinvestmentLifecycleResult => {
+        const stableGrowth = Math.min(TERMINAL_GROWTH_RATE, caseWacc - 0.01);
+        const stableROIC = clamp(caseWacc + stableROICSpread, caseWacc + 0.01, 0.35);
+        const stableReinvestmentRate = clamp(stableGrowth / stableROIC, 0.04, 0.35);
+        const years: ReinvestmentLifecycleYear[] = [];
+        let revenue = latestRevenue;
+        let shares = sharesOutstanding;
+        let sumPVFCFF = 0;
+        let finalFCFF = 0;
+
+        for (let year = 1; year <= projectionYears; year++) {
+            const totalProgress = projectionYears > 1 ? (year - 1) / (projectionYears - 1) : 1;
+            const fadeProgress = year <= PHASE_1_YEARS ? 0 : (year - PHASE_1_YEARS) / (projectionYears - PHASE_1_YEARS);
+            const revenueGrowth = year <= PHASE_1_YEARS
+                ? phaseOneGrowth
+                : phaseOneGrowth - (phaseOneGrowth - stableGrowth) * fadeProgress;
+            const roic = year <= PHASE_1_YEARS
+                ? inputs.observedROIC
+                : inputs.observedROIC - (inputs.observedROIC - stableROIC) * fadeProgress;
+            const normalizedMargin = inputs.ebitMargin + (terminalMargin - inputs.ebitMargin) * totalProgress;
+            const reinvestmentRate = clamp(revenueGrowth / Math.max(roic, 0.01), stableReinvestmentRate, 0.90);
+
+            revenue *= 1 + clamp(revenueGrowth, -0.05, 0.35);
+            shares *= 1 + sbcDilutionRate;
+            const nopat = revenue * clamp(normalizedMargin, 0.05, 0.70) * (1 - inputs.taxRate);
+            const reinvestment = Math.max(0, nopat * reinvestmentRate);
+            const fcff = nopat - reinvestment;
+            finalFCFF = fcff;
+            sumPVFCFF += fcff / Math.pow(1 + caseWacc, year);
+            years.push({ year, revenue, revenueGrowth, roic, reinvestmentRate, nopat, reinvestment, fcff, dilutedShares: shares });
+        }
+
+        const terminalValue = (finalFCFF * (1 + stableGrowth)) / (caseWacc - stableGrowth);
+        const discountedTV = terminalValue / Math.pow(1 + caseWacc, projectionYears);
+        const enterpriseValue = sumPVFCFF + discountedTV;
+        const equityValue = enterpriseValue - netDebt;
+        const perShare = shares > 0 ? equityValue / shares : 0;
+        const marketCap = (bundle.profile.marketCap ?? bundle.profile.mktCap) || sharesOutstanding * (bundle.profile.price || 0);
+        const currentEnterpriseValue = marketCap + netDebt;
+        const reverseRequiredGrowth = finalFCFF > 0 && currentEnterpriseValue > sumPVFCFF
+            ? clamp(((currentEnterpriseValue - sumPVFCFF) * Math.pow(1 + caseWacc, projectionYears) * (caseWacc - stableGrowth)) / finalFCFF - 1, -0.50, 1.00)
+            : 0;
+
+        return {
+            perShare: Number.isFinite(perShare) ? perShare : 0,
+            enterpriseValue,
+            equityValue,
+            terminalPct: enterpriseValue > 0 ? discountedTV / enterpriseValue : 0,
+            reverseRequiredGrowth,
+            observedROIC: inputs.observedROIC,
+            observedReinvestmentRate: inputs.observedReinvestmentRate,
+            observedImpliedGrowth: inputs.observedImpliedGrowth,
+            stableROIC,
+            stableReinvestmentRate,
+            stableGrowth,
+            sbcDilutionRate,
+            model: label,
+            years,
+        };
+    };
+
+    const baseGrowth = clamp(analystGrowth.rate, 0.12, 0.30);
+    const bullGrowth = clamp(Math.max(analystGrowth.rate + 0.02, inputs.observedImpliedGrowth * 0.90), baseGrowth, 0.33);
+
+    return {
+        model: 'profitable_reinvestment_fade_bridge_fcff',
+        base: buildCase('profitable_reinvestment_fade_bridge_base', 23, baseGrowth, 0.27, 0.075, wacc),
+        bull: buildCase('profitable_reinvestment_fade_bridge_bull', 20, bullGrowth, 0.42, 0.09, wacc),
+    };
+}
+
+function valueCyclicalSemicapMidCycleDCF(
+    bundle: DCFDataBundle,
+    growth: { rate: number },
+): SemicapMidCycleResult {
+    const marketData = normalizeMarketData(bundle);
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+    const cashFlow = [...bundle.cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+    const latestIncome = income[0];
+    const oldestIncome = income[income.length - 1] ?? latestIncome;
+    const latestYear = Number(latestIncome?.calendarYear || latestIncome?.date.slice(0, 4) || new Date().getFullYear());
+    const oldestYear = Number(oldestIncome?.calendarYear || oldestIncome?.date.slice(0, 4) || latestYear - 4);
+    const latestRevenue = latestIncome?.revenue || 0;
+    const secularTrend = clamp(simpleCAGR(oldestIncome?.revenue || 0, latestRevenue, Math.max(1, latestYear - oldestYear)) ?? 0, -0.05, 0.12);
+    const rows = income.map((inc, index) => {
+        const cf = cashFlow[index];
+        const revenue = inc.revenue || 1;
+        const taxRate = inc.incomeBeforeTax > 0 ? clamp(inc.incomeTaxExpense / inc.incomeBeforeTax, 0.05, 0.30) : TAX_RATE;
+        const da = cf?.depreciationAndAmortization || inc.depreciationAndAmortization || 0;
+        const capex = Math.abs(cf?.capitalExpenditure || 0);
+        const workingCapitalInvestment = -(cf?.changeInWorkingCapital || 0);
+        const fcffMargin = (inc.operatingIncome * (1 - taxRate) + da - capex - workingCapitalInvestment) / revenue;
+        const reportedFCF = cf?.freeCashFlow ?? ((cf?.operatingCashFlow || 0) - capex);
+        return { revenue, fcffMargin, reportedFCFMargin: reportedFCF / revenue };
+    }).filter(row => row.revenue > 0);
+    const trendAdjustedRevenue = rows.map((row, index) => row.revenue * Math.pow(1 + secularTrend, index));
+    const midCycleRevenue = trendAdjustedRevenue.length ? median(trendAdjustedRevenue) : latestRevenue;
+    const cyclePosition = latestRevenue > 0 && midCycleRevenue > 0 ? latestRevenue / midCycleRevenue - 1 : 0;
+    const blendedMargins = rows.map(row => (row.fcffMargin + row.reportedFCFMargin) / 2).filter(Number.isFinite);
+    const baseMargin = clamp(blendedMargins.length ? median(blendedMargins) : 0.18, 0.08, 0.36);
+    const bearMargin = clamp(blendedMargins.length ? percentile(blendedMargins, 0.25) : baseMargin * 0.85, 0.05, baseMargin);
+    const bullMargin = clamp(blendedMargins.length ? percentile(blendedMargins, 0.75) : baseMargin * 1.15, baseMargin, 0.42);
+    const adjustedBeta = clamp(bundle.profile.beta || 1.2, 1.05, 1.35);
+    const totalCapital = marketData.marketCap + Math.max(0, marketData.netDebt);
+    const equityWeight = totalCapital > 0 ? marketData.marketCap / totalCapital : 0.90;
+    const debtWeight = totalCapital > 0 ? Math.max(0, marketData.netDebt) / totalCapital : 0.10;
+    const costOfEquity = RISK_FREE_RATE + adjustedBeta * EQUITY_RISK_PREMIUM;
+    const cycleAdjustedWacc = clamp(equityWeight * costOfEquity + debtWeight * 0.055 * (1 - TAX_RATE), 0.09, 0.115);
+    const cyclePenalty = Math.max(0, cyclePosition) * 0.45;
+    const normalizedGrowth = clamp((growth.rate * 0.60) + (secularTrend * 0.40) - cyclePenalty, -0.03, 0.12);
+
+    const valueCase = (scenario: string, normalizedRevenue: number, margin: number, firstGrowth: number, wacc: number, terminalGrowth: number): SemicapMidCycleScenario => {
+        let revenue = normalizedRevenue;
+        let sumPVFCFF = 0;
+        let finalFCFF = 0;
+        for (let year = 1; year <= PROJECTION_YEARS; year++) {
+            const fade = PROJECTION_YEARS > 1 ? (year - 1) / (PROJECTION_YEARS - 1) : 1;
+            const revenueGrowth = firstGrowth + (terminalGrowth - firstGrowth) * fade;
+            revenue *= 1 + revenueGrowth;
+            finalFCFF = revenue * margin;
+            sumPVFCFF += finalFCFF / Math.pow(1 + wacc, year);
+        }
+        const tg = clamp(terminalGrowth, -0.01, wacc - 0.01);
+        const terminalValue = (finalFCFF * (1 + tg)) / (wacc - tg);
+        const discountedTerminalValue = terminalValue / Math.pow(1 + wacc, PROJECTION_YEARS);
+        const enterpriseValue = sumPVFCFF + discountedTerminalValue;
+        const equityValue = enterpriseValue - marketData.netDebt;
+        return {
+            scenario,
+            normalizedRevenue,
+            growth: firstGrowth,
+            margin,
+            wacc,
+            terminalGrowth: tg,
+            enterpriseValue,
+            equityValue,
+            perShare: marketData.sharesOutstanding > 0 ? equityValue / marketData.sharesOutstanding : 0,
+            sumPVFCFF,
+            discountedTerminalValue,
+            terminalPct: enterpriseValue > 0 ? discountedTerminalValue / enterpriseValue : 0,
+        };
+    };
+
+    return {
+        model: 'cyclical_semicap_midcycle_dcf',
+        marketData,
+        latestRevenue,
+        midCycleRevenue,
+        cyclePosition,
+        secularTrend,
+        normalizedGrowth,
+        baseMargin,
+        bear: valueCase('bear_trough_margin', midCycleRevenue * 0.92, bearMargin, Math.min(normalizedGrowth, 0.02), cycleAdjustedWacc + 0.0125, 0.02),
+        base: valueCase('base_midcycle', midCycleRevenue, baseMargin, normalizedGrowth, cycleAdjustedWacc, TERMINAL_GROWTH_RATE),
+        bull: valueCase('bull_cycle_recovery', midCycleRevenue * 1.08, bullMargin, clamp(normalizedGrowth + 0.035, 0.02, 0.15), cycleAdjustedWacc - 0.0075, 0.03),
+    };
+}
+
+function valuePharmaProductCycleDCF(
+    bundle: DCFDataBundle,
+    fallbackPrice: number,
+    framework: 'product_cycle' | 'supercycle' = 'product_cycle',
+): PharmaProductCycleResult {
+    const marketData = normalizeMarketData(bundle, fallbackPrice);
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestIncome = income[0];
+    const recentIncome = income.slice(0, 5);
+    const latestRevenueRaw = latestIncome?.revenue || 0;
+    const latestRevenue = latestRevenueRaw * marketData.financialStatementScale;
+    const currentYear = Number(latestIncome?.calendarYear || latestIncome?.date?.slice(0, 4) || new Date().getFullYear());
+    const historicalGrowth = simpleCAGR(income[4]?.revenue || 0, latestRevenueRaw, 4) ?? 0;
+    const forwardEstimate = [...bundle.analystEstimates]
+        .filter(e => (estimateRevenueAvg(e as unknown as Record<string, unknown>) ?? 0) > latestRevenueRaw && latestRevenueRaw > 0)
+        .sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''))[0];
+    const forwardRevenue = forwardEstimate ? estimateRevenueAvg(forwardEstimate as unknown as Record<string, unknown>) : undefined;
+    const rawForwardGrowth = forwardRevenue && latestRevenueRaw > 0 ? forwardRevenue / latestRevenueRaw - 1 : historicalGrowth;
+    const forwardGrowth = clamp(rawForwardGrowth, -0.10, 0.45);
+    const growthSignal = clamp(Math.max(historicalGrowth, forwardGrowth), 0.02, 0.32);
+    const operatingMargins = recentIncome.filter(inc => inc.revenue > 0).map(inc => inc.operatingIncome / inc.revenue);
+    const rndRatios = recentIncome.filter(inc => inc.revenue > 0).map(inc => (inc.researchAndDevelopmentExpenses || 0) / inc.revenue);
+    const operatingMargin = clamp(average(operatingMargins), 0.12, 0.45);
+    const rndToRevenue = clamp(average(rndRatios), 0.08, 0.32);
+    const adjustedOperatingMargin = clamp(operatingMargin + rndToRevenue * 0.25, 0.16, 0.48);
+    const beta = clamp(bundle.profile.beta || 1, 0.75, 1.35);
+    const baseWacc = clamp(RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM, 0.075, 0.12);
+    const projectionYears = 12;
+
+    type PharmaAssumption = {
+        scenario: string;
+        nearGrowth: number;
+        peakGrowth: number;
+        erosionStart: number;
+        erosionRate: number;
+        terminalMarginCap: number;
+        wacc: number;
+        pipelineCredit: number;
+    };
+
+    const assumptions: PharmaAssumption[] = framework === 'supercycle'
+        ? [
+            { scenario: 'bear_supercycle_normalizes', nearGrowth: clamp(growthSignal * 0.65, 0.04, 0.18), peakGrowth: clamp(growthSignal * 0.75, 0.05, 0.20), erosionStart: 8, erosionRate: 0.08, terminalMarginCap: 0.30, wacc: clamp(baseWacc + 0.005, 0.08, 0.13), pipelineCredit: 0.08 },
+            { scenario: 'base_supercycle_durable_product_cycle', nearGrowth: clamp(growthSignal * 0.90, 0.06, 0.26), peakGrowth: clamp(growthSignal, 0.08, 0.28), erosionStart: 11, erosionRate: 0.035, terminalMarginCap: 0.35, wacc: baseWacc, pipelineCredit: 0.16 },
+            { scenario: 'bull_supercycle_pipeline_replacement', nearGrowth: clamp(growthSignal * 1.10, 0.08, 0.32), peakGrowth: clamp(growthSignal * 1.20, 0.10, 0.34), erosionStart: 14, erosionRate: 0.015, terminalMarginCap: 0.40, wacc: clamp(baseWacc - 0.0075, 0.075, 0.12), pipelineCredit: 0.28 },
+        ]
+        : [
+            { scenario: 'bear_product_cycle_erosion', nearGrowth: clamp(growthSignal * 0.45, 0.02, 0.12), peakGrowth: clamp(growthSignal * 0.55, 0.02, 0.14), erosionStart: 7, erosionRate: 0.10, terminalMarginCap: 0.26, wacc: clamp(baseWacc + 0.01, 0.08, 0.13), pipelineCredit: 0.04 },
+            { scenario: 'base_product_cycle_sotp', nearGrowth: clamp(growthSignal * 0.75, 0.03, 0.20), peakGrowth: clamp(growthSignal * 0.85, 0.04, 0.22), erosionStart: 9, erosionRate: 0.06, terminalMarginCap: 0.32, wacc: baseWacc, pipelineCredit: 0.10 },
+            { scenario: 'bull_product_cycle_pipeline_replacement', nearGrowth: clamp(growthSignal, 0.05, 0.28), peakGrowth: clamp(growthSignal * 1.10, 0.06, 0.30), erosionStart: 11, erosionRate: 0.03, terminalMarginCap: 0.36, wacc: clamp(baseWacc - 0.005, 0.075, 0.12), pipelineCredit: 0.18 },
+        ];
+
+    const valueAssumption = (assumption: PharmaAssumption): PharmaProductCycleScenarioValue => {
+        let revenue = latestRevenue;
+        let sumPVFCFF = 0;
+        let finalFCFF = 0;
+        const projection: PharmaProductCycleProjectionYear[] = [];
+
+        for (let year = 1; year <= projectionYears; year++) {
+            const fadeProgress = projectionYears > 1 ? (year - 1) / (projectionYears - 1) : 1;
+            const rampProgress = Math.min(year / 4, 1);
+            const productCycleGrowth = assumption.nearGrowth + (assumption.peakGrowth - assumption.nearGrowth) * rampProgress;
+            let growth = productCycleGrowth + (TERMINAL_GROWTH_RATE - productCycleGrowth) * fadeProgress;
+            if (year >= assumption.erosionStart) {
+                const erosionProgress = (year - assumption.erosionStart + 1) / (projectionYears - assumption.erosionStart + 1);
+                growth -= assumption.erosionRate * erosionProgress;
+            }
+            growth = clamp(growth, -0.10, 0.35);
+            revenue *= 1 + growth;
+            const operatingMarginAtYear = clamp(
+                adjustedOperatingMargin + (assumption.terminalMarginCap - adjustedOperatingMargin) * fadeProgress,
+                0.12,
+                Math.max(adjustedOperatingMargin, assumption.terminalMarginCap),
+            );
+            const nopat = revenue * operatingMarginAtYear * (1 - TAX_RATE);
+            const rndMaintenanceToRevenue = clamp(rndToRevenue * 0.35, 0.03, 0.10);
+            const fcff = nopat - revenue * rndMaintenanceToRevenue;
+            finalFCFF = fcff;
+            sumPVFCFF += fcff / Math.pow(1 + assumption.wacc, year);
+            projection.push({ year: currentYear + year, revenue, growth, operatingMargin: operatingMarginAtYear, rndMaintenanceToRevenue, fcff });
+        }
+
+        const terminalGrowth = clamp(TERMINAL_GROWTH_RATE, 0.00, assumption.wacc - 0.005);
+        const terminalValue = (finalFCFF * (1 + terminalGrowth)) / (assumption.wacc - terminalGrowth);
+        const discountedTerminalValue = terminalValue / Math.pow(1 + assumption.wacc, projectionYears);
+        const coreEnterpriseValue = sumPVFCFF + discountedTerminalValue;
+        const pipelineValue = coreEnterpriseValue * assumption.pipelineCredit;
+        const enterpriseValue = coreEnterpriseValue + pipelineValue;
+        const equityValue = enterpriseValue - marketData.netDebt;
+
+        return {
+            scenario: assumption.scenario,
+            wacc: assumption.wacc,
+            terminalGrowth,
+            enterpriseValue,
+            equityValue,
+            perShare: marketData.sharesOutstanding > 0 ? equityValue / marketData.sharesOutstanding : 0,
+            sumPVFCFF,
+            discountedTerminalValue,
+            terminalPct: enterpriseValue > 0 ? discountedTerminalValue / enterpriseValue : 0,
+            pipelineCreditPct: enterpriseValue > 0 ? pipelineValue / enterpriseValue : 0,
+            projection,
+        };
+    };
+
+    const [bear, base, bull] = assumptions.map(valueAssumption);
+    const baseAssumption = assumptions[1];
+    const currentEnterpriseValue = marketData.enterpriseValue;
+    const baseCoreEnterpriseValue = base.enterpriseValue / (1 + baseAssumption.pipelineCredit);
+    const requiredPipelineCredit = baseCoreEnterpriseValue > 0 ? currentEnterpriseValue / baseCoreEnterpriseValue - 1 : Number.POSITIVE_INFINITY;
+    const solveRequired = (low: number, high: number, valueFor: (candidate: number) => number): number => {
+        let left = low;
+        let right = high;
+        for (let i = 0; i < 80; i++) {
+            const mid = (left + right) / 2;
+            if (valueFor(mid) < currentEnterpriseValue) left = mid;
+            else right = mid;
+        }
+        return (left + right) / 2;
+    };
+    const requiredTerminalMargin = solveRequired(0.18, 0.55, margin => valueAssumption({ ...baseAssumption, terminalMarginCap: margin }).enterpriseValue);
+    const requiredGrowthMultiplier = solveRequired(0.50, 2.50, multiplier => valueAssumption({
+        ...baseAssumption,
+        nearGrowth: clamp(baseAssumption.nearGrowth * multiplier, 0.00, 0.45),
+        peakGrowth: clamp(baseAssumption.peakGrowth * multiplier, 0.00, 0.50),
+    }).enterpriseValue);
+    let requiredErosionStartYear: number | null = null;
+    for (let erosionStart = baseAssumption.erosionStart; erosionStart <= 20; erosionStart++) {
+        if (valueAssumption({ ...baseAssumption, erosionStart }).enterpriseValue >= currentEnterpriseValue) {
+            requiredErosionStartYear = currentYear + erosionStart;
+            break;
+        }
+    }
+
+    return {
+        model: framework === 'supercycle' ? 'pharma_supercycle_sotp_dcf' : 'pharma_product_cycle_sotp_dcf',
+        framework,
+        marketData,
+        latestRevenue,
+        historicalGrowth,
+        forwardGrowth,
+        growthSignal,
+        operatingMargin,
+        rndToRevenue,
+        adjustedOperatingMargin,
+        bear,
+        base,
+        bull,
+        reverseDiagnostics: {
+            currentEnterpriseValue,
+            requiredPipelineCredit,
+            requiredTerminalMargin,
+            requiredGrowthMultiplier,
+            requiredErosionStartYear,
+            notes: [
+                requiredPipelineCredit > 0.50 ? 'Market requires very large explicit pipeline/label-expansion credit at base assumptions.' : 'Pipeline credit requirement is within a plausible stress range.',
+                requiredTerminalMargin > 0.45 ? 'Market requires unusually high normalized terminal operating margin.' : 'Terminal margin requirement is not the main pressure point.',
+                requiredGrowthMultiplier > 1.75 ? 'Market requires materially longer/stronger growth duration than base case.' : 'Growth-duration requirement is moderate.',
+                requiredErosionStartYear === null ? 'Delaying erosion alone cannot bridge to market value under base assumptions.' : `Base assumptions need erosion delayed to about ${requiredErosionStartYear}.`,
+            ],
+        },
+    };
+}
+
+function valueRegulatedUtilityDDM(
+    bundle: DCFDataBundle,
+    growth: { rate: number },
+    costOfEquityInput: number,
+    sharesOutstanding: number,
+): UtilityDDMResult {
+    const income = [...bundle.incomeStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const cashFlow = [...bundle.cashFlowStatements].sort((a, b) => b.date.localeCompare(a.date));
+    const latestIncome = income[0];
+    const latestCashFlow = cashFlow[0] as unknown as Record<string, unknown> | undefined;
+    const latestEPS = latestIncome?.epsdiluted && latestIncome.epsdiluted > 0
+        ? latestIncome.epsdiluted
+        : sharesOutstanding > 0
+            ? (latestIncome?.netIncome || 0) / sharesOutstanding
+            : 0;
+    const dividendsPaid = Math.abs(firstNumber(latestCashFlow ?? {}, ['dividendsPaid', 'commonDividendsPaid', 'netDividendsPaid']) || 0);
+    const cashFlowDividendPerShare = sharesOutstanding > 0 ? dividendsPaid / sharesOutstanding : 0;
+    const profileDividendPerShare = bundle.profile.lastDiv && bundle.profile.lastDiv > 0 ? bundle.profile.lastDiv : 0;
+    const dividendPerShare = cashFlowDividendPerShare > 0 ? cashFlowDividendPerShare : profileDividendPerShare;
+    const firstEstimate = [...bundle.analystEstimates]
+        .filter(e => (estimateEpsAvg(e as unknown as Record<string, unknown>) ?? 0) > 0)
+        .sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''))[0];
+    const forwardEPS = firstEstimate ? estimateEpsAvg(firstEstimate as unknown as Record<string, unknown>) : undefined;
+    const rawPayoutRatio = latestEPS > 0 && dividendPerShare > 0 ? dividendPerShare / latestEPS : 0;
+    const payoutRatio = clamp(rawPayoutRatio, 0.45, 0.90);
+    const baseDividend = forwardEPS && payoutRatio > 0
+        ? forwardEPS * payoutRatio
+        : dividendPerShare;
+    const costOfEquity = Math.max(costOfEquityInput, 0.055);
+    const baseGrowth = clamp(growth.rate, 0.00, Math.min(TERMINAL_GROWTH_RATE, costOfEquity - 0.01));
+
+    const buildCase = (
+        scenario: string,
+        growthRate: number,
+        costOfEquityCase: number,
+        terminalGrowth: number,
+        payoutRatioCase: number,
+    ): UtilityDDMScenarioValue => {
+        const stableGrowth = clamp(growthRate, 0.00, Math.min(terminalGrowth, costOfEquityCase - 0.01));
+        const discountRate = Math.max(costOfEquityCase, stableGrowth + 0.01);
+        const dividend = forwardEPS && payoutRatioCase > 0
+            ? forwardEPS * payoutRatioCase
+            : baseDividend;
+        const perShare = dividend > 0 ? (dividend * (1 + stableGrowth)) / (discountRate - stableGrowth) : 0;
+        return {
+            scenario,
+            costOfEquity: discountRate,
+            growthRate: stableGrowth,
+            terminalGrowth: stableGrowth,
+            payoutRatio: payoutRatioCase,
+            dividendPerShare: dividend,
+            perShare: Number.isFinite(perShare) ? perShare : 0,
+            stage1PV: 0,
+            terminalPV: Number.isFinite(perShare) ? perShare : 0,
+        };
+    };
+
+    return {
+        model: forwardEPS ? 'regulated_utility_forward_eps_payout_ddm' : 'regulated_utility_current_dividend_ddm',
+        latestEPS,
+        dividendPerShare,
+        payoutRatio,
+        costOfEquity,
+        bear: buildCase('bear_regulated_utility_ddm', clamp(baseGrowth - 0.005, 0.00, TERMINAL_GROWTH_RATE), costOfEquity + 0.005, TERMINAL_GROWTH_RATE, clamp(payoutRatio - 0.05, 0.05, 0.90)),
+        base: buildCase('base_regulated_utility_ddm', baseGrowth, costOfEquity, TERMINAL_GROWTH_RATE, payoutRatio),
+        bull: buildCase('bull_regulated_utility_ddm', clamp(baseGrowth + 0.005, 0.00, TERMINAL_GROWTH_RATE), Math.max(0.05, costOfEquity - 0.005), TERMINAL_GROWTH_RATE, clamp(payoutRatio + 0.05, 0.05, 0.90)),
+    };
+}
+
+function deriveFrameworkConfidence(
+    classification: ValuationFramework['classification'],
+    suitability: ValuationFramework['suitability'],
+    marketData: NormalizedMarketData,
+    terminalValuePct: number,
+    waccClamped: boolean,
+): { confidence: ValuationConfidence; reasons: string[] } {
+    const reasons: string[] = [];
+    if (!suitability.isSuitableForDCF) {
+        reasons.push('Selected class is unsuitable for standard FCFF/DCF.');
+        return { confidence: 'UNSUITABLE', reasons };
+    }
+    let score = 3;
+    if (marketData.warnings.length > 0) {
+        score -= 1;
+        reasons.push('Market data has price/share/market-cap consistency warnings.');
+    }
+    if (terminalValuePct > 0.75) {
+        score -= 1;
+        reasons.push('Terminal value concentration is high.');
+    }
+    if (waccClamped) {
+        score -= 1;
+        reasons.push('WACC was clamped.');
+    }
+    if (['growth_optional', 'heavy_reinvestment', 'cyclical'].includes(classification.valuationClass)) {
+        score -= 1;
+        reasons.push(`Valuation class ${classification.valuationClass} has higher forecast uncertainty.`);
+    }
+    if (classification.valuationClass === 'mature_defensive') {
+        score += 1;
+        reasons.push('Mature defensive classification supports higher DCF reliability.');
+    }
+    if (reasons.length === 0) reasons.push('No major data-quality or model-suitability warning detected.');
+    return { confidence: score >= 3 ? 'HIGH' : score >= 2 ? 'MEDIUM' : 'LOW', reasons };
+}
+
+function derivePriceOffsetConfidence(baseValue: number, currentPrice: number, suitability: ValuationFramework['suitability']): { confidence: ValuationConfidence; reason: string } {
+    if (!suitability.isSuitableForDCF) {
+        return { confidence: 'UNSUITABLE', reason: 'DCF is not suitable for this classification.' };
+    }
+    if (!Number.isFinite(baseValue) || baseValue <= 0 || currentPrice <= 0) {
+        return { confidence: 'LOW', reason: 'Base valuation or current price is unavailable.' };
+    }
+    const absoluteOffset = Math.abs(baseValue - currentPrice) / currentPrice;
+    if (absoluteOffset <= 0.25) {
+        return { confidence: 'HIGH', reason: `Base IV is within ${(absoluteOffset * 100).toFixed(1)}% of market price.` };
+    }
+    if (absoluteOffset <= 0.50) {
+        return { confidence: 'MEDIUM', reason: `Base IV is ${(absoluteOffset * 100).toFixed(1)}% from market price.` };
+    }
+    return { confidence: 'LOW', reason: `Base IV is ${(absoluteOffset * 100).toFixed(1)}% from market price.` };
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1283,12 +2913,13 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
 
     // ─── 1. Fetch all data via FMP ────────────────────
     console.log(`📊 [DCF] Step 1: Fetching FMP data bundle...`);
-    const [bundle, priceResult] = await Promise.all([
+    const [bundle, priceResult, keyMetrics] = await Promise.all([
         fetchDCFDataBundle(sym),
         getPrice({ symbol: sym }),
+        fetchFMPKeyMetrics(sym, 'annual', 5).catch(() => [] as FMPKeyMetrics[]),
     ]);
     const { profile, incomeStatements, balanceSheets, cashFlowStatements,
-            enterpriseValues, analystEstimates, revenueSegments } = bundle;
+            analystEstimates, revenueSegments } = bundle;
 
     // ─── 2. Extract key inputs ───────────────────────
     console.log(`📊 [DCF] Step 2: Extracting inputs...`);
@@ -1299,9 +2930,10 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const latestBalance = sortedBalance[0];
     const latestCashFlow = sortedCashFlow[0];
     const baseRevenue = latestIncome.revenue;
-    const currentPrice = priceResult.data.price;
+    const marketData = normalizeMarketData(bundle, priceResult.data.price);
+    const currentPrice = marketData.currentPrice;
     const filingDate = latestIncome.fillingDate;
-    const sharesOutstanding = enterpriseValues?.[0]?.numberOfShares || ((profile.marketCap ?? profile.mktCap) / profile.price) || 0;
+    const sharesOutstanding = marketData.sharesOutstanding;
 
     if (baseRevenue <= 0) {
         throw new APIError(`Cannot run DCF for ${sym}: latest revenue is zero or negative.`, { symbol: sym, baseRevenue });
@@ -1320,7 +2952,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const capexToRevenue = rawCapex !== 0 ? Math.abs(rawCapex) / baseRevenue : 0.05;
     const daToRevenue = latestCashFlow.depreciationAndAmortization > 0
         ? latestCashFlow.depreciationAndAmortization / baseRevenue : 0.03;
-    const netDebt = latestBalance.netDebt || 0;
+    const netDebt = marketData.netDebt;
     const cash = latestBalance.cashAndCashEquivalents || 0;
 
     // ─── 4. GDP ceiling ──────────────────────────────
@@ -1347,7 +2979,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     console.log(`📊 [DCF] Step 6: Calculating peer beta & WACC...`);
     const sector = (profile.sector || 'DEFAULT').toUpperCase();
     const sectorDefaults = SECTOR_DEFAULTS[sector] || SECTOR_DEFAULTS['DEFAULT'];
-    const targetDE = (profile.marketCap ?? profile.mktCap) > 0 ? (latestBalance.totalDebt || 0) / (profile.marketCap ?? profile.mktCap) : 0;
+    const targetDE = marketData.marketCap > 0 ? (latestBalance.totalDebt || 0) / marketData.marketCap : 0;
     const peerBetaResult = await calculatePeerBeta(
         bundle.peers,
         targetDE,
@@ -1367,7 +2999,8 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         peerBetaResult.method = 'profile_fallback';
     }
 
-    const waccResult = calculateWACC(profile, latestBalance, latestIncome, {}, peerBetaResult);
+    const normalizedProfileForCapital = { ...profile, marketCap: marketData.marketCap, mktCap: marketData.marketCap, price: currentPrice };
+    const waccResult = calculateWACC(normalizedProfileForCapital, latestBalance, latestIncome, {}, peerBetaResult);
     console.log(`📊 [DCF] WACC: ${(waccResult.wacc * 100).toFixed(2)}%${waccResult.clamped ? ' (clamped)' : ''}`);
 
     // ─── F1: Check for Financial Institutions ─────────────
@@ -1376,6 +3009,41 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         { sector: profile.sector, industry: profile.industry },
         { netInterestIncome: latestIncome.netInterestIncome, interestExpense: latestIncome.interestExpense, netPremium: latestIncome.netPremium, revenue: latestIncome.revenue }
     );
+    const classification = classifyValuationFramework(bundle, profile, growth, fcfMargin, capexToRevenue, waccResult.wacc, keyMetrics);
+    const normalizedForeignDataUsable = isUsableNormalizedForeignMarketData(marketData);
+    const adrPharmaRouteAllowed = classification.valuationClass === 'adr_foreign' &&
+        normalizedForeignDataUsable &&
+        ['pharma_product_cycle_compounder', 'pharma_supercycle_compounder'].includes(classification.reinvestmentSubclass);
+    const genericDCFWhileSpecializedModelBuilds = [
+        'turnaround_or_low_roic_reinvestment',
+        'capital_light_software_compounder',
+        'acquisition_platform',
+        'semiconductor_ai_acquisition_platform',
+        'cyclical_semicap_compounder',
+        'biotech_pipeline_compounder',
+    ].includes(classification.reinvestmentSubclass) &&
+        !['financial', 'utility', 'reit', 'adr_foreign'].includes(classification.valuationClass);
+    const frameworkSuitability: ValuationFramework['suitability'] = isUnsupportedFinancialForFramework(finCheck)
+        ? {
+            isSuitableForDCF: false,
+            message: `${finCheck.type} is not suitable for standard FCFF/DCF because debt, deposits, reserves, working capital, and reinvestment do not behave like operating-company capital.`,
+        }
+        : classification.valuationClass === 'adr_foreign'
+            ? {
+                isSuitableForDCF: adrPharmaRouteAllowed,
+                message: adrPharmaRouteAllowed
+                    ? 'ADR/foreign pharma route allowed after market/share/currency normalization; review data-quality warnings.'
+                    : 'ADR/foreign listings require currency and ADR-ratio normalization before a reliable production DCF.',
+            }
+            : genericDCFWhileSpecializedModelBuilds
+                ? {
+                    isSuitableForDCF: true,
+                    message: `${classification.reinvestmentSubclass} specialized model is being built; generic FCFF DCF is shown as an interim full valuation experience.`,
+                }
+            : {
+                isSuitableForDCF: true,
+                message: 'DCF is usable, but framework diagnostics should be reviewed alongside the point estimate.',
+            };
 
     let modelUsed = 'standard_dcf';
     let altValuationResult: DDMResult | FFOResult | FCFEResult | null = null;
@@ -1490,10 +3158,20 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
     const upside = (valuation.intrinsicValuePerShare - currentPrice) / currentPrice;
     const warnings = generateWarnings(growth, waccResult, valuation, fcfMargin, componentFCFFMargin);
     if (growth.warning) warnings.push(growth.warning);
+    warnings.push(...marketData.warnings);
     // Note: GDP ceiling enforcement for user overrides happens in step 4 above (throws).
     // This warning catches auto-calculated edge cases (should be rare due to Math.min clamp).
     if (terminalGrowthRate > gdpCeiling) {
         warnings.push(`Terminal growth (${(terminalGrowthRate * 100).toFixed(1)}%) exceeds GDP ceiling (${(gdpCeiling * 100).toFixed(1)}%).`);
+    }
+    if (sym === 'TSLA') {
+        warnings.push('TSLA uses a dedicated scenario framework; base value excludes separately modeled real-option value for FSD/Robotaxi/Optimus.');
+    }
+    if (classification.reinvestmentSubclass === 'capex_heavy_scaled_reinvestor' && sym !== 'TSLA') {
+        warnings.push('Capex-heavy scaled reinvestor uses a scenario-based valuation; review bear/base/bull range and capex fade assumptions.');
+    }
+    if (genericDCFWhileSpecializedModelBuilds) {
+        warnings.push(`${classification.reinvestmentSubclass} specialized model is being built; generic FCFF DCF is provided as an interim valuation view.`);
     }
 
     // ─── 13. Sensitivity Analysis & Football Field ───────────────────────
@@ -1510,21 +3188,265 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         currentPrice
     );
 
-    // Derive confidence based on data quality signals
-    const hasClampedWACC = waccResult.clamped;
-    const hasAnalystGrowth = growth.source === 'analyst_forward_revenue';
-    const derivedConfidence = !hasClampedWACC && hasAnalystGrowth ? 'High'
-                            : hasClampedWACC ? 'Low'
-                            : 'Medium';
+    const buildScenarioValue = (label: string, growthRate: number, margin: number, wacc: number): ValuationRange => {
+        const scenarioProjections = projectCashFlows(
+            baseRevenue,
+            growthRate,
+            margin,
+            ebitdaMargin,
+            capexToRevenue,
+            daToRevenue,
+            effectiveTaxRate,
+            PROJECTION_YEARS,
+            terminalGrowthRate,
+        );
+        const scenarioValue = calculateIntrinsicValue(scenarioProjections, wacc, terminalGrowthRate, sharesOutstanding, netDebt, cash, filingDate);
+        return buildValuationRange(label, scenarioValue.intrinsicValuePerShare, currentPrice, 'ebitda_based_fcff');
+    };
+    const teslaScenario = sym === 'TSLA' ? valueTeslaScenarioDCF(bundle, marketData) : null;
+    const utilityDDMScenario = !teslaScenario && frameworkSuitability.isSuitableForDCF && classification.valuationClass === 'utility'
+        ? valueRegulatedUtilityDDM(bundle, growth, waccResult.components.costOfEquity, sharesOutstanding)
+        : null;
+    const capexHeavyScenario = !teslaScenario && !utilityDDMScenario && frameworkSuitability.isSuitableForDCF && classification.reinvestmentSubclass === 'capex_heavy_scaled_reinvestor'
+        ? valueCapexHeavyScaledReinvestorDCF(bundle, marketData, waccResult.wacc)
+        : null;
+    const highROICScenario = !teslaScenario && !capexHeavyScenario && frameworkSuitability.isSuitableForDCF && classification.reinvestmentSubclass === 'high_roic_mature_compounder'
+        ? {
+            model: 'high_roic_mature_fade_bridge_fcff',
+            bear: valueHighROICMatureFadeBridgeFCFF(bundle, keyMetrics, { rate: Math.max(-0.05, growth.rate - 0.02) }, Math.min(0.20, waccResult.wacc + 0.01), sharesOutstanding, netDebt),
+            base: valueHighROICMatureFadeBridgeFCFF(bundle, keyMetrics, growth, waccResult.wacc, sharesOutstanding, netDebt),
+            bull: valueHighROICMatureFadeBridgeFCFF(bundle, keyMetrics, { rate: Math.min(0.35, growth.rate + 0.02) }, Math.max(0.04, waccResult.wacc - 0.01), sharesOutstanding, netDebt),
+        }
+        : null;
+    const profitableReinvestmentScenario = !teslaScenario && !capexHeavyScenario && !highROICScenario && frameworkSuitability.isSuitableForDCF &&
+        classification.reinvestmentSubclass === 'profitable_reinvestment_other' &&
+        classification.valuationClass !== 'mature_defensive' &&
+        classification.valuationClass !== 'cyclical'
+        ? {
+            ...valueProfitableReinvestmentFadeBridgeFCFF(bundle, keyMetrics, growth, waccResult.wacc, sharesOutstanding, netDebt),
+            bear: valueProfitableReinvestmentFadeBridgeFCFF(bundle, keyMetrics, { rate: Math.max(-0.05, growth.rate - 0.03) }, Math.min(0.20, waccResult.wacc + 0.01), sharesOutstanding, netDebt).base,
+        }
+        : null;
+    // Cyclical semicap mid-cycle model is intentionally disabled for now.
+    // Route semicap names through generic FCFF with the specialized-model warning until the model is retuned.
+    const semicapScenario = null;
+    const pharmaScenario = !teslaScenario && !capexHeavyScenario && !highROICScenario && !profitableReinvestmentScenario && !semicapScenario && frameworkSuitability.isSuitableForDCF &&
+        ['pharma_product_cycle_compounder', 'pharma_supercycle_compounder'].includes(classification.reinvestmentSubclass)
+        ? valuePharmaProductCycleDCF(
+            bundle,
+            currentPrice,
+            classification.reinvestmentSubclass === 'pharma_supercycle_compounder' ? 'supercycle' : 'product_cycle',
+        )
+        : null;
+    const bearRange = teslaScenario
+        ? buildValuationRange('Bear', teslaScenario.bear.perShare, currentPrice, teslaScenario.bear.scenario)
+        : utilityDDMScenario
+        ? buildValuationRange('Bear', utilityDDMScenario.bear.perShare, currentPrice, utilityDDMScenario.bear.scenario)
+        : capexHeavyScenario
+        ? buildValuationRange('Bear', capexHeavyScenario.bear.perShare, currentPrice, capexHeavyScenario.bear.scenario)
+        : highROICScenario
+        ? buildValuationRange('Bear', highROICScenario.bear.perShare, currentPrice, `${highROICScenario.model}_bear`)
+        : profitableReinvestmentScenario
+        ? buildValuationRange('Bear', profitableReinvestmentScenario.bear.perShare, currentPrice, profitableReinvestmentScenario.bear.model)
+        : semicapScenario
+        ? buildValuationRange('Bear', semicapScenario.bear.perShare, currentPrice, semicapScenario.bear.scenario)
+        : pharmaScenario
+        ? buildValuationRange('Bear', pharmaScenario.bear.perShare, currentPrice, pharmaScenario.bear.scenario)
+        : frameworkSuitability.isSuitableForDCF
+        ? buildScenarioValue('Bear', Math.max(-0.05, growth.rate - 0.04), Math.max(0.03, fcfMargin - 0.04), Math.min(0.20, waccResult.wacc + 0.01))
+        : buildValuationRange('Bear', 0, currentPrice, 'dcf_unsuitable');
+    const baseRange = teslaScenario
+        ? buildValuationRange('Base', teslaScenario.base.perShare, currentPrice, teslaScenario.base.scenario)
+        : utilityDDMScenario
+        ? buildValuationRange('Base', utilityDDMScenario.base.perShare, currentPrice, utilityDDMScenario.base.scenario)
+        : capexHeavyScenario
+        ? buildValuationRange('Base', capexHeavyScenario.base.perShare, currentPrice, capexHeavyScenario.base.scenario)
+        : highROICScenario
+        ? buildValuationRange('Base', highROICScenario.base.perShare, currentPrice, highROICScenario.model)
+        : profitableReinvestmentScenario
+        ? buildValuationRange('Base', profitableReinvestmentScenario.base.perShare, currentPrice, profitableReinvestmentScenario.model)
+        : semicapScenario
+        ? buildValuationRange('Base', semicapScenario.base.perShare, currentPrice, semicapScenario.base.scenario)
+        : pharmaScenario
+        ? buildValuationRange('Base', pharmaScenario.base.perShare, currentPrice, pharmaScenario.base.scenario)
+        : frameworkSuitability.isSuitableForDCF
+        ? buildValuationRange('Base', valuation.intrinsicValuePerShare, currentPrice, modelUsed !== 'standard_dcf' ? modelUsed : 'ebitda_based_fcff')
+        : buildValuationRange('Base', 0, currentPrice, 'dcf_unsuitable');
+    const bullRange = teslaScenario
+        ? buildValuationRange('Bull', teslaScenario.bull.perShare, currentPrice, teslaScenario.bull.scenario)
+        : utilityDDMScenario
+        ? buildValuationRange('Bull', utilityDDMScenario.bull.perShare, currentPrice, utilityDDMScenario.bull.scenario)
+        : capexHeavyScenario
+        ? buildValuationRange('Bull', capexHeavyScenario.bull.perShare, currentPrice, capexHeavyScenario.bull.scenario)
+        : highROICScenario
+        ? buildValuationRange('Bull', highROICScenario.bull.perShare, currentPrice, `${highROICScenario.model}_bull`)
+        : profitableReinvestmentScenario
+        ? buildValuationRange('Bull', profitableReinvestmentScenario.bull.perShare, currentPrice, profitableReinvestmentScenario.bull.model)
+        : semicapScenario
+        ? buildValuationRange('Bull', semicapScenario.bull.perShare, currentPrice, semicapScenario.bull.scenario)
+        : pharmaScenario
+        ? buildValuationRange('Bull', pharmaScenario.bull.perShare, currentPrice, pharmaScenario.bull.scenario)
+        : frameworkSuitability.isSuitableForDCF
+        ? buildScenarioValue('Bull', Math.min(0.35, growth.rate + 0.04), Math.min(0.50, fcfMargin + 0.04), Math.max(0.04, waccResult.wacc - 0.01))
+        : buildValuationRange('Bull', 0, currentPrice, 'dcf_unsuitable');
+    const finalEBITDAForReverse = finalEBITDA > 0 ? finalEBITDA : 0;
+    const impliedExitMultiple = finalEBITDAForReverse > 0
+        ? (marketData.enterpriseValue * Math.pow(1 + waccResult.wacc, PROJECTION_YEARS) - valuation.sumDiscountedFCF) / finalEBITDAForReverse
+        : null;
+    const relativeValuation = frameworkSuitability.isSuitableForDCF
+        ? await buildRelativeValuation(bundle, keyMetrics, baseRevenue, ebitdaMargin, marketData)
+        : undefined;
+    const confidenceResult = deriveFrameworkConfidence(
+        classification,
+        frameworkSuitability,
+        marketData,
+        valuation.terminalValuePct,
+        waccResult.clamped,
+    );
+    const priceOffsetConfidence = derivePriceOffsetConfidence(baseRange.value, currentPrice, frameworkSuitability);
+    const actualValues = !frameworkSuitability.isSuitableForDCF
+        ? buildActualValues(latestIncome, latestBalance, marketData)
+        : undefined;
+    const primaryFrameworkModel = teslaScenario
+        ? teslaScenario.model
+        : utilityDDMScenario
+        ? utilityDDMScenario.model
+        : capexHeavyScenario
+        ? capexHeavyScenario.model
+        : highROICScenario
+        ? highROICScenario.model
+        : profitableReinvestmentScenario
+        ? profitableReinvestmentScenario.model
+        : semicapScenario
+        ? semicapScenario.model
+        : pharmaScenario
+        ? pharmaScenario.model
+        : frameworkSuitability.isSuitableForDCF
+        ? (classification.reinvestmentSubclass !== 'not_reinvestment' ? classification.reinvestmentSubclass : 'standard_fcff')
+        : 'dcf_unsuitable_actual_values';
+    const selectedFramework = teslaScenario
+        ? 'tesla_scenario_framework'
+        : utilityDDMScenario
+            ? 'regulated_utility_dividend_discount_model'
+            : capexHeavyScenario
+            ? 'scenario_based_capex_heavy_scaled_reinvestor'
+            : highROICScenario
+                ? 'high_roic_mature_fade_bridge'
+                : profitableReinvestmentScenario
+                    ? 'profitable_reinvestment_fade_bridge'
+                    : semicapScenario
+                        ? 'cyclical_semicap_midcycle_dcf'
+                        : pharmaScenario
+                    ? `risk_adjusted_pharma_${pharmaScenario.framework}`
+                    : frameworkSuitability.isSuitableForDCF
+                        ? 'intrinsic_dcf_with_framework_diagnostics'
+                        : 'actual_values_only';
+    const reverseInterpretation = teslaScenario
+        ? `Base TSLA scenario market-price reverse check: ${teslaScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_industry_beta')?.flag ?? 'N/A'}.`
+        : utilityDDMScenario
+            ? `Utility DDM selected. Base dividend $${utilityDDMScenario.base.dividendPerShare.toFixed(2)}, payout ${(utilityDDMScenario.base.payoutRatio * 100).toFixed(1)}%, cost of equity ${(utilityDDMScenario.base.costOfEquity * 100).toFixed(2)}%, stable growth ${(utilityDDMScenario.base.growthRate * 100).toFixed(2)}%.`
+            : capexHeavyScenario
+            ? `Base capex-heavy scenario market-price reverse check: ${capexHeavyScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_tsla_directional_capex_fade')?.flag ?? 'N/A'}.`
+            : highROICScenario
+                ? `High-ROIC fade bridge reverse check requires ${(highROICScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% terminal-step growth pressure versus a ${(highROICScenario.base.stableGrowth * 100).toFixed(2)}% stable-growth model.`
+                : profitableReinvestmentScenario
+                    ? `Profitable reinvestment fade bridge reverse check requires ${(profitableReinvestmentScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% terminal-step growth pressure versus a ${(profitableReinvestmentScenario.base.stableGrowth * 100).toFixed(2)}% stable-growth model.`
+                    : semicapScenario
+                        ? `Cyclical semicap mid-cycle model selected. Mid-cycle revenue $${(semicapScenario.midCycleRevenue / 1e9).toFixed(2)}B, normalized growth ${(semicapScenario.normalizedGrowth * 100).toFixed(2)}%, base margin ${(semicapScenario.baseMargin * 100).toFixed(2)}%.`
+                        : pharmaScenario
+                    ? `Pharma reverse check: required pipeline credit ${(pharmaScenario.reverseDiagnostics.requiredPipelineCredit * 100).toFixed(2)}%, terminal margin ${(pharmaScenario.reverseDiagnostics.requiredTerminalMargin * 100).toFixed(2)}%, growth multiplier ${pharmaScenario.reverseDiagnostics.requiredGrowthMultiplier.toFixed(2)}x. ${pharmaScenario.reverseDiagnostics.notes.join(' ')}`
+                    : reverseDCFResult.interpretation;
+    const valuationFramework: ValuationFramework = {
+        primaryModel: primaryFrameworkModel,
+        selectedFramework,
+        classification,
+        confidence: frameworkSuitability.isSuitableForDCF ? priceOffsetConfidence.confidence : confidenceResult.confidence,
+        confidenceReasons: teslaScenario
+            ? [priceOffsetConfidence.reason, 'Tesla valuation is scenario-dependent and highly sensitive to growth, margin, WACC, dilution, and optionality assumptions.']
+            : utilityDDMScenario
+                ? [priceOffsetConfidence.reason, 'Regulated utility route uses dividend discount model because payout policy is more informative than FCFF reinvestment math.']
+                : capexHeavyScenario
+                ? [priceOffsetConfidence.reason, 'Capex-heavy scaled reinvestor valuation is scenario-based and sensitive to capex fade, EBITDA margin, and terminal assumptions.']
+                : highROICScenario
+                ? [priceOffsetConfidence.reason, 'High-ROIC mature compounder uses capped fade-bridge assumptions by sector/scale to avoid terminal-growth fantasy.']
+                    : profitableReinvestmentScenario
+                        ? [priceOffsetConfidence.reason, 'Profitable reinvestment fade bridge links growth, ROIC, reinvestment, margin normalization, dilution, and GDP-like terminal growth.']
+                        : semicapScenario
+                            ? [priceOffsetConfidence.reason, 'Cyclical semicap model uses mid-cycle revenue, normalized margins, and cycle-adjusted WACC.']
+                            : pharmaScenario
+                        ? [priceOffsetConfidence.reason, 'Risk-adjusted pharma product-cycle valuation is sensitive to erosion timing, pipeline credit, growth duration, and terminal margin.']
+                        : genericDCFWhileSpecializedModelBuilds
+                            ? [priceOffsetConfidence.reason, `${classification.reinvestmentSubclass} specialized model is being built; generic FCFF DCF is interim.`, ...confidenceResult.reasons]
+                            : [priceOffsetConfidence.reason, ...confidenceResult.reasons],
+        modelSelectionReasons: [
+            `Valuation class: ${classification.valuationClass}`,
+            `Reinvestment subclass: ${classification.reinvestmentSubclass}`,
+            teslaScenario ? 'TSLA explicit scenario framework selected.' :
+                utilityDDMScenario ? 'Regulated utility DDM selected before reinvestment subclass routing.' :
+                capexHeavyScenario ? 'Capex-heavy scaled reinvestor scenario framework selected.' :
+                highROICScenario ? 'High-ROIC fade bridge selected for mature compounder subclass.' :
+                profitableReinvestmentScenario ? 'Profitable reinvestment fade bridge selected from model lab.' :
+                semicapScenario ? 'Cyclical semicap mid-cycle model selected from model lab.' :
+                pharmaScenario ? `${pharmaScenario.framework === 'supercycle' ? 'Pharma supercycle' : 'Pharma product-cycle'} framework selected.` :
+                genericDCFWhileSpecializedModelBuilds ? `${classification.reinvestmentSubclass} has no production-ready specialized model yet; using generic FCFF DCF as interim full valuation.` :
+                frameworkSuitability.message,
+        ],
+        suitability: frameworkSuitability,
+        primaryResult: baseRange,
+        scenarioRange: {
+            bear: bearRange,
+            base: baseRange,
+            bull: bullRange,
+        },
+        reverseImpliedAssumptions: {
+            impliedGrowthRate: teslaScenario?.reverseTerminalGrowth.find(r => r.scenario === 'base_industry_beta')?.requiredTerminalGrowth ??
+                utilityDDMScenario?.base.growthRate ??
+                capexHeavyScenario?.reverseTerminalGrowth.find(r => r.scenario === 'base_tsla_directional_capex_fade')?.requiredTerminalGrowth ??
+                highROICScenario?.base.reverseRequiredGrowth ??
+                profitableReinvestmentScenario?.base.reverseRequiredGrowth ??
+                semicapScenario?.normalizedGrowth ??
+                pharmaScenario?.reverseDiagnostics.requiredGrowthMultiplier ??
+                reverseDCFResult.impliedGrowthRate,
+            impliedGrowthFormatted: teslaScenario
+                ? `${((teslaScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_industry_beta')?.requiredTerminalGrowth ?? 0) * 100).toFixed(2)}% terminal growth required`
+                : utilityDDMScenario
+                    ? `${(utilityDDMScenario.base.growthRate * 100).toFixed(2)}% stable dividend growth`
+                    : capexHeavyScenario
+                    ? `${((capexHeavyScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_tsla_directional_capex_fade')?.requiredTerminalGrowth ?? 0) * 100).toFixed(2)}% terminal growth required`
+                    : highROICScenario
+                        ? `${(highROICScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% reverse growth pressure`
+                        : profitableReinvestmentScenario
+                            ? `${(profitableReinvestmentScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% reverse growth pressure`
+                            : semicapScenario
+                                ? `${(semicapScenario.normalizedGrowth * 100).toFixed(2)}% normalized mid-cycle growth`
+                                : pharmaScenario
+                            ? `${pharmaScenario.reverseDiagnostics.requiredGrowthMultiplier.toFixed(2)}x base product-cycle growth multiplier required`
+                            : reverseDCFResult.impliedGrowthFormatted,
+            impliedExitMultiple: teslaScenario?.base.impliedEVTo2033EBITDA ?? (impliedExitMultiple && Number.isFinite(impliedExitMultiple) ? impliedExitMultiple : null),
+            interpretation: reverseInterpretation,
+        },
+        relativeValuation,
+        marketData,
+        actualValues,
+        warnings,
+    };
 
     const result: DCFResult = {
         metadata: {
             companyName: profile.companyName, ticker: sym,
-            sector: profile.sector || 'Unknown', dcfMethod: modelUsed !== 'standard_dcf' ? modelUsed : 'ebitda_based_fcff',
+            sector: profile.sector || 'Unknown',
+            dcfMethod: primaryFrameworkModel,
             analysisDate: new Date().toISOString(),
             financialInstitution: finCheck.isFinancialInstitution ? { type: finCheck.type, reason: finCheck.reason } : undefined,
         },
-        currentMarketData: { currentPrice, marketCap: (profile.marketCap ?? profile.mktCap) || 0, sharesOutstanding },
+        currentMarketData: {
+            currentPrice,
+            marketCap: marketData.marketCap,
+            sharesOutstanding,
+            enterpriseValue: marketData.enterpriseValue,
+            source: marketData.source,
+            warnings: marketData.warnings,
+        },
         growthAnalysis: {
             selectedGrowthRate: growth.rate, growthSource: growth.source,
             revenueCAGR3yr: growth.raw, normalizedFCFMargin: fcfMargin, fcffMethod: fcfMethod,
@@ -1559,14 +3481,27 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
         valuationSummary: {
             // For financial institutions, ONLY use the DDM/FFO/FCFE result - NEVER fall back to standard DCF
-            intrinsicValue: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+            intrinsicValue: !frameworkSuitability.isSuitableForDCF
+                ? 0
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                ? baseRange.value
+                : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? Math.round(altValuationResult.intrinsicValue * 100) / 100
                 : (finCheck.isFinancialInstitution ? 0 : Math.round(valuation.intrinsicValuePerShare * 100) / 100),
             currentPrice,
-            upsideDownside: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+            upsideDownside: !frameworkSuitability.isSuitableForDCF
+                ? 'N/A'
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                ? baseRange.upside
+                : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? (((altValuationResult.intrinsicValue - currentPrice) / currentPrice * 100).toFixed(2) + '%')
                 : (finCheck.isFinancialInstitution ? 'N/A' : (upside * 100).toFixed(2) + '%'),
-            valuation: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+            valuation: !frameworkSuitability.isSuitableForDCF
+                ? 'USE_MARKET_PRICE'
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                ? (baseRange.value > currentPrice * 1.15 ? 'UNDERVALUED' :
+                   baseRange.value < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
+                : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? (altValuationResult.intrinsicValue > currentPrice * 1.15 ? 'UNDERVALUED' :
                    altValuationResult.intrinsicValue < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
                 : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' :
@@ -1574,13 +3509,34 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         },
         reverseDCF: reverseDCFResult,
         investmentRecommendation: {
-            confidence: derivedConfidence,
-            recommendation: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+            confidence: valuationFramework.confidence,
+            recommendation: !frameworkSuitability.isSuitableForDCF
+                ? 'USE_MARKET_PRICE'
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                ? (baseRange.value > currentPrice * 1.20 ? 'BUY' :
+                   baseRange.value > currentPrice * 0.90 ? 'HOLD' : 'SELL')
+                : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? (altValuationResult.intrinsicValue > currentPrice * 1.20 ? 'BUY' :
                    altValuationResult.intrinsicValue < currentPrice * 0.80 ? 'SELL' : 'HOLD')
                 : (finCheck.isFinancialInstitution ? 'USE_MARKET_PRICE' :
                    (upside > 0.20 ? 'BUY' : upside > -0.10 ? 'HOLD' : 'SELL')),
-            reasoning: (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
+            reasoning: teslaScenario
+                ? `Tesla scenario framework selected. Base scenario IV $${teslaScenario.base.perShare.toFixed(2)}, bear $${teslaScenario.bear.perShare.toFixed(2)}, bull $${teslaScenario.bull.perShare.toFixed(2)}. Market-implied base terminal growth: ${((teslaScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_industry_beta')?.requiredTerminalGrowth ?? 0) * 100).toFixed(2)}%.`
+                : utilityDDMScenario
+                ? `Regulated utility DDM selected. Base IV $${utilityDDMScenario.base.perShare.toFixed(2)}, bear $${utilityDDMScenario.bear.perShare.toFixed(2)}, bull $${utilityDDMScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
+                : capexHeavyScenario
+                ? `Capex-heavy scaled reinvestor scenario framework selected. Base scenario IV $${capexHeavyScenario.base.perShare.toFixed(2)}, bear $${capexHeavyScenario.bear.perShare.toFixed(2)}, bull $${capexHeavyScenario.bull.perShare.toFixed(2)}. Market-implied base terminal growth: ${((capexHeavyScenario.reverseTerminalGrowth.find(r => r.scenario === 'base_tsla_directional_capex_fade')?.requiredTerminalGrowth ?? 0) * 100).toFixed(2)}%.`
+                : highROICScenario
+                ? `High-ROIC fade bridge selected. Base IV $${highROICScenario.base.perShare.toFixed(2)}, bear $${highROICScenario.bear.perShare.toFixed(2)}, bull $${highROICScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
+                : profitableReinvestmentScenario
+                ? `Profitable reinvestment fade bridge selected. Base IV $${profitableReinvestmentScenario.base.perShare.toFixed(2)}, bear $${profitableReinvestmentScenario.bear.perShare.toFixed(2)}, bull $${profitableReinvestmentScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
+                : semicapScenario
+                ? `Cyclical semicap mid-cycle model selected. Base IV $${semicapScenario.base.perShare.toFixed(2)}, bear $${semicapScenario.bear.perShare.toFixed(2)}, bull $${semicapScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
+                : pharmaScenario
+                ? `${pharmaScenario.framework === 'supercycle' ? 'Pharma supercycle' : 'Pharma product-cycle'} framework selected. Base IV $${pharmaScenario.base.perShare.toFixed(2)}, bear $${pharmaScenario.bear.perShare.toFixed(2)}, bull $${pharmaScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
+                : !frameworkSuitability.isSuitableForDCF
+                ? `${frameworkSuitability.message} Current market price is $${currentPrice.toFixed(2)}; actual values are provided in valuationFramework.actualValues.`
+                : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? `Financial institution valuation using ${modelUsed.replace('financial_', '').toUpperCase()} model. ` +
                   `Cost of Equity: ${(finCostOfEquity * 100).toFixed(1)}%, Terminal Growth: ${(finTerminalGrowthRate * 100).toFixed(1)}%.`
                 : (finCheck.isFinancialInstitution 
@@ -1599,6 +3555,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         warnings,
         sensitivityAnalysis: sensitivityResult || undefined,
         footballField: footballField || undefined,
+        valuationFramework,
     };
 
     console.log(`✅ [DCF v5] Complete for ${sym}. IV: $${valuation.intrinsicValuePerShare.toFixed(2)} | Price: $${currentPrice.toFixed(2)} | Upside: ${(upside * 100).toFixed(1)}%`);

@@ -48,6 +48,7 @@ logs/
 # Temporary files
 tmp/
 temp/
+private/
 
 # Reference Material
 *.md

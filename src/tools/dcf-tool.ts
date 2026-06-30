@@ -145,6 +145,39 @@ function formatDCFOutput(result: DCFResult): string {
     output += `  Confidence:     ${investmentRecommendation.confidence}\n`;
     output += `  ${investmentRecommendation.reasoning}\n`;
 
+    if (result.valuationFramework) {
+        const vf = result.valuationFramework;
+        output += `\n${'─'.repeat(70)}\n`;
+        output += `  🧭 VALUATION FRAMEWORK\n`;
+        output += `${'─'.repeat(70)}\n`;
+        output += `  Framework:      ${vf.selectedFramework}\n`;
+        output += `  Primary Model:  ${vf.primaryModel}\n`;
+        output += `  Class:          ${vf.classification.valuationClass}\n`;
+        output += `  Subclass:       ${vf.classification.reinvestmentSubclass}\n`;
+        output += `  DCF Suitable:   ${vf.suitability.isSuitableForDCF ? 'Yes' : 'No'}\n`;
+        output += `  Confidence:     ${vf.confidence}\n`;
+        output += `  Note:           ${vf.suitability.message}\n`;
+        output += `\n  Scenario Range:\n`;
+        output += `    Bear: ${fmtNum(vf.scenarioRange.bear.value).padStart(12)} (${vf.scenarioRange.bear.upside})\n`;
+        output += `    Base: ${fmtNum(vf.scenarioRange.base.value).padStart(12)} (${vf.scenarioRange.base.upside})\n`;
+        output += `    Bull: ${fmtNum(vf.scenarioRange.bull.value).padStart(12)} (${vf.scenarioRange.bull.upside})\n`;
+        output += `\n  Reverse Diagnostics:\n`;
+        output += `    Implied Growth: ${vf.reverseImpliedAssumptions.impliedGrowthFormatted}\n`;
+        if (vf.reverseImpliedAssumptions.impliedExitMultiple !== null) {
+            output += `    Implied Exit Multiple: ${vf.reverseImpliedAssumptions.impliedExitMultiple.toFixed(1)}x\n`;
+        }
+        if (vf.relativeValuation?.ranges?.length) {
+            output += `\n  Relative Valuation Cross-Checks:\n`;
+            for (const range of vf.relativeValuation.ranges) {
+                output += `    ${range.metric}: target ${range.targetMultiple.toFixed(1)}x | peer median ${range.peerMedian?.toFixed(1) ?? 'N/A'}x | implied ${fmtNum(range.impliedValue)}\n`;
+            }
+        }
+        if (vf.marketData.warnings.length > 0) {
+            output += `\n  Market Data Flags:\n`;
+            for (const warning of vf.marketData.warnings) output += `    • ${warning}\n`;
+        }
+    }
+
     // ── Warnings ────────────────────────────
     if (warnings.length > 0) {
         output += `\n${'─'.repeat(70)}\n`;
