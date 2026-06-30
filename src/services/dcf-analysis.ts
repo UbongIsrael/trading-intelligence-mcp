@@ -1759,6 +1759,9 @@ function valueCyclicalSemicapMidCycleDCF(
     };
 }
 
+// Keep the disabled semicap model compiled for future retuning without enabling production routing.
+void valueCyclicalSemicapMidCycleDCF;
+
 function valuePharmaProductCycleDCF(
     bundle: DCFDataBundle,
     fallbackPrice: number,
@@ -3229,8 +3232,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         : null;
     // Cyclical semicap mid-cycle model is intentionally disabled for now.
     // Route semicap names through generic FCFF with the specialized-model warning until the model is retuned.
-    const semicapScenario = null;
-    const pharmaScenario = !teslaScenario && !capexHeavyScenario && !highROICScenario && !profitableReinvestmentScenario && !semicapScenario && frameworkSuitability.isSuitableForDCF &&
+    const pharmaScenario = !teslaScenario && !capexHeavyScenario && !highROICScenario && !profitableReinvestmentScenario && frameworkSuitability.isSuitableForDCF &&
         ['pharma_product_cycle_compounder', 'pharma_supercycle_compounder'].includes(classification.reinvestmentSubclass)
         ? valuePharmaProductCycleDCF(
             bundle,
@@ -3248,8 +3250,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         ? buildValuationRange('Bear', highROICScenario.bear.perShare, currentPrice, `${highROICScenario.model}_bear`)
         : profitableReinvestmentScenario
         ? buildValuationRange('Bear', profitableReinvestmentScenario.bear.perShare, currentPrice, profitableReinvestmentScenario.bear.model)
-        : semicapScenario
-        ? buildValuationRange('Bear', semicapScenario.bear.perShare, currentPrice, semicapScenario.bear.scenario)
         : pharmaScenario
         ? buildValuationRange('Bear', pharmaScenario.bear.perShare, currentPrice, pharmaScenario.bear.scenario)
         : frameworkSuitability.isSuitableForDCF
@@ -3265,8 +3265,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         ? buildValuationRange('Base', highROICScenario.base.perShare, currentPrice, highROICScenario.model)
         : profitableReinvestmentScenario
         ? buildValuationRange('Base', profitableReinvestmentScenario.base.perShare, currentPrice, profitableReinvestmentScenario.model)
-        : semicapScenario
-        ? buildValuationRange('Base', semicapScenario.base.perShare, currentPrice, semicapScenario.base.scenario)
         : pharmaScenario
         ? buildValuationRange('Base', pharmaScenario.base.perShare, currentPrice, pharmaScenario.base.scenario)
         : frameworkSuitability.isSuitableForDCF
@@ -3282,8 +3280,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         ? buildValuationRange('Bull', highROICScenario.bull.perShare, currentPrice, `${highROICScenario.model}_bull`)
         : profitableReinvestmentScenario
         ? buildValuationRange('Bull', profitableReinvestmentScenario.bull.perShare, currentPrice, profitableReinvestmentScenario.bull.model)
-        : semicapScenario
-        ? buildValuationRange('Bull', semicapScenario.bull.perShare, currentPrice, semicapScenario.bull.scenario)
         : pharmaScenario
         ? buildValuationRange('Bull', pharmaScenario.bull.perShare, currentPrice, pharmaScenario.bull.scenario)
         : frameworkSuitability.isSuitableForDCF
@@ -3317,8 +3313,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
         ? highROICScenario.model
         : profitableReinvestmentScenario
         ? profitableReinvestmentScenario.model
-        : semicapScenario
-        ? semicapScenario.model
         : pharmaScenario
         ? pharmaScenario.model
         : frameworkSuitability.isSuitableForDCF
@@ -3334,9 +3328,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 ? 'high_roic_mature_fade_bridge'
                 : profitableReinvestmentScenario
                     ? 'profitable_reinvestment_fade_bridge'
-                    : semicapScenario
-                        ? 'cyclical_semicap_midcycle_dcf'
-                        : pharmaScenario
+                    : pharmaScenario
                     ? `risk_adjusted_pharma_${pharmaScenario.framework}`
                     : frameworkSuitability.isSuitableForDCF
                         ? 'intrinsic_dcf_with_framework_diagnostics'
@@ -3351,9 +3343,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 ? `High-ROIC fade bridge reverse check requires ${(highROICScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% terminal-step growth pressure versus a ${(highROICScenario.base.stableGrowth * 100).toFixed(2)}% stable-growth model.`
                 : profitableReinvestmentScenario
                     ? `Profitable reinvestment fade bridge reverse check requires ${(profitableReinvestmentScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% terminal-step growth pressure versus a ${(profitableReinvestmentScenario.base.stableGrowth * 100).toFixed(2)}% stable-growth model.`
-                    : semicapScenario
-                        ? `Cyclical semicap mid-cycle model selected. Mid-cycle revenue $${(semicapScenario.midCycleRevenue / 1e9).toFixed(2)}B, normalized growth ${(semicapScenario.normalizedGrowth * 100).toFixed(2)}%, base margin ${(semicapScenario.baseMargin * 100).toFixed(2)}%.`
-                        : pharmaScenario
+                    : pharmaScenario
                     ? `Pharma reverse check: required pipeline credit ${(pharmaScenario.reverseDiagnostics.requiredPipelineCredit * 100).toFixed(2)}%, terminal margin ${(pharmaScenario.reverseDiagnostics.requiredTerminalMargin * 100).toFixed(2)}%, growth multiplier ${pharmaScenario.reverseDiagnostics.requiredGrowthMultiplier.toFixed(2)}x. ${pharmaScenario.reverseDiagnostics.notes.join(' ')}`
                     : reverseDCFResult.interpretation;
     const valuationFramework: ValuationFramework = {
@@ -3371,9 +3361,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 ? [priceOffsetConfidence.reason, 'High-ROIC mature compounder uses capped fade-bridge assumptions by sector/scale to avoid terminal-growth fantasy.']
                     : profitableReinvestmentScenario
                         ? [priceOffsetConfidence.reason, 'Profitable reinvestment fade bridge links growth, ROIC, reinvestment, margin normalization, dilution, and GDP-like terminal growth.']
-                        : semicapScenario
-                            ? [priceOffsetConfidence.reason, 'Cyclical semicap model uses mid-cycle revenue, normalized margins, and cycle-adjusted WACC.']
-                            : pharmaScenario
+                        : pharmaScenario
                         ? [priceOffsetConfidence.reason, 'Risk-adjusted pharma product-cycle valuation is sensitive to erosion timing, pipeline credit, growth duration, and terminal margin.']
                         : genericDCFWhileSpecializedModelBuilds
                             ? [priceOffsetConfidence.reason, `${classification.reinvestmentSubclass} specialized model is being built; generic FCFF DCF is interim.`, ...confidenceResult.reasons]
@@ -3386,7 +3374,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 capexHeavyScenario ? 'Capex-heavy scaled reinvestor scenario framework selected.' :
                 highROICScenario ? 'High-ROIC fade bridge selected for mature compounder subclass.' :
                 profitableReinvestmentScenario ? 'Profitable reinvestment fade bridge selected from model lab.' :
-                semicapScenario ? 'Cyclical semicap mid-cycle model selected from model lab.' :
                 pharmaScenario ? `${pharmaScenario.framework === 'supercycle' ? 'Pharma supercycle' : 'Pharma product-cycle'} framework selected.` :
                 genericDCFWhileSpecializedModelBuilds ? `${classification.reinvestmentSubclass} has no production-ready specialized model yet; using generic FCFF DCF as interim full valuation.` :
                 frameworkSuitability.message,
@@ -3404,7 +3391,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 capexHeavyScenario?.reverseTerminalGrowth.find(r => r.scenario === 'base_tsla_directional_capex_fade')?.requiredTerminalGrowth ??
                 highROICScenario?.base.reverseRequiredGrowth ??
                 profitableReinvestmentScenario?.base.reverseRequiredGrowth ??
-                semicapScenario?.normalizedGrowth ??
                 pharmaScenario?.reverseDiagnostics.requiredGrowthMultiplier ??
                 reverseDCFResult.impliedGrowthRate,
             impliedGrowthFormatted: teslaScenario
@@ -3417,9 +3403,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                         ? `${(highROICScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% reverse growth pressure`
                         : profitableReinvestmentScenario
                             ? `${(profitableReinvestmentScenario.base.reverseRequiredGrowth * 100).toFixed(2)}% reverse growth pressure`
-                            : semicapScenario
-                                ? `${(semicapScenario.normalizedGrowth * 100).toFixed(2)}% normalized mid-cycle growth`
-                                : pharmaScenario
+                            : pharmaScenario
                             ? `${pharmaScenario.reverseDiagnostics.requiredGrowthMultiplier.toFixed(2)}x base product-cycle growth multiplier required`
                             : reverseDCFResult.impliedGrowthFormatted,
             impliedExitMultiple: teslaScenario?.base.impliedEVTo2033EBITDA ?? (impliedExitMultiple && Number.isFinite(impliedExitMultiple) ? impliedExitMultiple : null),
@@ -3483,7 +3467,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             // For financial institutions, ONLY use the DDM/FFO/FCFE result - NEVER fall back to standard DCF
             intrinsicValue: !frameworkSuitability.isSuitableForDCF
                 ? 0
-                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || pharmaScenario)
                 ? baseRange.value
                 : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? Math.round(altValuationResult.intrinsicValue * 100) / 100
@@ -3491,14 +3475,14 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             currentPrice,
             upsideDownside: !frameworkSuitability.isSuitableForDCF
                 ? 'N/A'
-                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || pharmaScenario)
                 ? baseRange.upside
                 : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
                 ? (((altValuationResult.intrinsicValue - currentPrice) / currentPrice * 100).toFixed(2) + '%')
                 : (finCheck.isFinancialInstitution ? 'N/A' : (upside * 100).toFixed(2) + '%'),
             valuation: !frameworkSuitability.isSuitableForDCF
                 ? 'USE_MARKET_PRICE'
-                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || pharmaScenario)
                 ? (baseRange.value > currentPrice * 1.15 ? 'UNDERVALUED' :
                    baseRange.value < currentPrice * 0.85 ? 'OVERVALUED' : 'FAIRLY_VALUED')
                 : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
@@ -3512,7 +3496,7 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
             confidence: valuationFramework.confidence,
             recommendation: !frameworkSuitability.isSuitableForDCF
                 ? 'USE_MARKET_PRICE'
-                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || semicapScenario || pharmaScenario)
+                : (teslaScenario || utilityDDMScenario || capexHeavyScenario || highROICScenario || profitableReinvestmentScenario || pharmaScenario)
                 ? (baseRange.value > currentPrice * 1.20 ? 'BUY' :
                    baseRange.value > currentPrice * 0.90 ? 'HOLD' : 'SELL')
                 : (finCheck.isFinancialInstitution && altValuationResult && altValuationResult.intrinsicValue > 0)
@@ -3530,8 +3514,6 @@ export async function runDCFAnalysis(symbol: string): Promise<DCFResult> {
                 ? `High-ROIC fade bridge selected. Base IV $${highROICScenario.base.perShare.toFixed(2)}, bear $${highROICScenario.bear.perShare.toFixed(2)}, bull $${highROICScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
                 : profitableReinvestmentScenario
                 ? `Profitable reinvestment fade bridge selected. Base IV $${profitableReinvestmentScenario.base.perShare.toFixed(2)}, bear $${profitableReinvestmentScenario.bear.perShare.toFixed(2)}, bull $${profitableReinvestmentScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
-                : semicapScenario
-                ? `Cyclical semicap mid-cycle model selected. Base IV $${semicapScenario.base.perShare.toFixed(2)}, bear $${semicapScenario.bear.perShare.toFixed(2)}, bull $${semicapScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
                 : pharmaScenario
                 ? `${pharmaScenario.framework === 'supercycle' ? 'Pharma supercycle' : 'Pharma product-cycle'} framework selected. Base IV $${pharmaScenario.base.perShare.toFixed(2)}, bear $${pharmaScenario.bear.perShare.toFixed(2)}, bull $${pharmaScenario.bull.perShare.toFixed(2)}. ${reverseInterpretation}`
                 : !frameworkSuitability.isSuitableForDCF
